@@ -221,9 +221,10 @@ fn a_scope_name_outside_the_alphabet_is_refused() {
 fn a_certificate_body_over_the_byte_limit_is_refused() {
     let (root, phone) = (id(1), id(2));
     let mut cert = issue(&root, &spec(&phone));
-    let mut body = CertificateBody::decode(cert.body.as_slice()).unwrap();
-    body.agreement_key = vec![0; MAX_CERT_BYTES];
-    cert.body = body.encode_to_vec();
+    // An unknown field (tag 15, length-delimited) decodes and is ignored, so only the byte limit can refuse this.
+    cert.body.push(15 << 3 | 2);
+    cert.body.extend_from_slice(&[0x80, 0x08]); // varint 1024
+    cert.body.extend_from_slice(&[0; 1024]);
     cert.signature = root.sign(CERT_LABEL, &cert.body);
     assert_eq!(verify_chain(&root.public(), &[cert], NOW).unwrap_err(), ChainError::Malformed);
 }
