@@ -8,6 +8,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("cargo:rerun-if-changed={root}/{file}");
     }
     let descriptors = protox::compile(files, [root])?;
-    prost_build::Config::new().compile_fds(descriptors)?;
+    prost_build::Config::new()
+        // The two fields a relay moves without reading: shared by reference instead of copied, so a payload decoded
+        // from a websocket message is a slice of that message (docs/perf/README.md, encode once).
+        .bytes([".wmlhub.v1.Envelope.payload", ".wmlhub.v1.Envelope.coalesce"])
+        .compile_fds(descriptors)?;
     Ok(())
 }

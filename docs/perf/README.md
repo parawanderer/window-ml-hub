@@ -97,9 +97,38 @@ Before is `main` at `582e348`; three rounds each, 100k deliveries/s offered, eve
 `sample` over 5 s at 50 accounts, before -> after: `__psynch_mutexwait` 12,482 -> 596, `__psynch_mutexdrop` 1,456 -> 44.
 What is left on top is `kevent` (2,506) and `sendto` (1,455): the IO reactor and a syscall per websocket message.
 
+### Encode once, share bytes
+
+A published envelope is stamped and encoded once, in the ring; the ring, every subscriber's queue and every backfill
+hold the same `Bytes`. Payloads arrive as slices of the websocket message (zero-copy decode), stream keys are shared
+(`Arc`), fan-out no longer collects subscribers into a `Vec`, and the writer feeds every ready batch and flushes once.
+Before is `main` at `25317e1` (sharded). Three rounds each unless stated; every delivery arrived.
+
+| scenario | build | transit p50 | transit p99 | hub CPU per 1k deliveries | hub RSS |
+| --- | --- | --- | --- | --- | --- |
+| 512 B, 10 accounts x 5 subscribers, 100k/s | before | 228-287 us | 0.76-3.45 ms | 6.2-8.2 us | 26-28 MB |
+| | after | 202-280 us | 0.41-1.04 ms | 4.4-6.6 us | 22-27 MB |
+| 16 KiB, 10 accounts x 5 subscribers, 10k/s | before | 249-401 us | 0.50-1.68 ms | 20.6, 33.9, 34.2 us | 273-276 MB |
+| | after | 248-329 us | 0.60-1.21 ms | 18.4, 22.0, 23.2 us | **354-356 MB** (see below) |
+| 512 B, 1 account x 50 subscribers, 100k/s | before | 235-379 us | 0.41-1.23 ms | 6.3-10.4 us | ~9 MB |
+| | after | 220-268 us | 0.48-2.47 ms | 6.2-6.8 us | ~9 MB |
+| 16,000 B, 10 accounts (one round) | before | | | 37.2 us | 269.7 MB |
+| | after | | | 26.8 us | 270.6 MB |
+| 18,000 B, 10 accounts (one round) | before | | | 43.6 us | 359.5 MB |
+| | after | | | 29.6 us | 354.0 MB |
+
+- **CPU falls with payload size**: about 30% at 16-18 KB, inside the noise at 512 B (the ranges overlap).
+- **The 16 KiB memory "regression" is the allocator, not the design.** With a payload of exactly 16,384 bytes the
+  old ring's payload `Vec` sat on a malloc size class; the encoded frame (payload plus about 64 bytes of envelope)
+  is 16,448 bytes, which macOS 26.6 rounds to 20,480 (`malloc_size`), 4,032 bytes wasted per retained entry. That
+  matches the ~4.6 KB per entry measured. At 16,000 and 18,000 bytes, which align with nothing, memory is equal or
+  lower. Real payloads are ciphertext of arbitrary length.
+- **Trap for anyone benchmarking memory here**: never use a power-of-two payload size. It lands on an allocator size
+  class for one layout and just past it for another, and the comparison measures the allocator.
+
 ## Next (from the profile)
 
 1. ~~Shard the relay by account, so tenants do not share a lock.~~ Done, above.
-2. Encode a published envelope once and share its bytes across subscribers and backfill.
+2. ~~Encode a published envelope once and share its bytes across subscribers and backfill.~~ Done, above.
 3. Fixed-size ids instead of `Vec<u8>` keys; bounded-cost eviction for the ring byte budget.
 4. Fewer syscalls per message on the write path.
