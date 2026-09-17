@@ -21,7 +21,8 @@ use hpke::{Deserializable, Kem as _, OpModeR, OpModeS, Serializable};
 use wmlhub_keys::{ChainError, Identity, PublicKey, principal_id, sign_command, verify_chain, verify_command};
 
 pub use stream::{
-    Grant, MAX_STREAM_FRAME_BYTES, Published, StreamError, StreamKey, StreamReader, open_grant, seal_frame, wrap_key,
+    CHANNEL_BYTES, ChannelKey, Grant, MAX_STREAM_FRAME_BYTES, Published, StreamError, StreamKey, StreamReader,
+    open_grant, seal_frame, wrap_key,
 };
 use wmlhub_proto::prost::Message;
 use wmlhub_proto::v1::{Certificate, CertificateBody, CommandBody, Sealed, SignedCommand};

@@ -240,3 +240,18 @@ fn frame_costs() {
         eprintln!("batch {size} B: frame {} B, seal {seal:?}, open {open:?}", frames[0].len());
     }
 }
+
+#[test]
+fn channel_names_are_keyed_so_the_hub_cannot_tell_what_they_are_for() {
+    let (one, two) = (ChannelKey::from_bytes([1; 32]), ChannelKey::from_bytes([2; 32]));
+    let session = b"5f3a9c21";
+    assert_eq!(one.channel("events", session), one.channel("events", session), "the same name every time");
+    assert_ne!(one.channel("events", session), one.channel("keys", session), "one session, two streams");
+    assert_ne!(one.channel("events", session), one.channel("events", b"5f3a9c22"), "two sessions");
+    assert_ne!(
+        one.channel("events", session),
+        two.channel("events", session),
+        "two accounts watching the same box do not share a channel name"
+    );
+    assert_eq!(one.channel("events", session).len(), CHANNEL_BYTES);
+}

@@ -1292,6 +1292,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "wmlhub-client"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "tokio",
+ "tokio-tungstenite",
+ "wmlhub",
+ "wmlhub-keys",
+ "wmlhub-proto",
+ "wmlhub-seal",
+]
+
+[[package]]
 name = "wmlhub-frame"
 version = "0.1.0"
 
@@ -1342,6 +1355,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "getrandom",
+ "hmac",
  "hpke",
  "sha2",
  "wmlhub-keys",

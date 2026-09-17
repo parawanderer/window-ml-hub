@@ -104,7 +104,9 @@ As built (`crates/seal`, wire format `proto/wmlhub/v1/seal.proto`):
   remaining devices. Old ring entries stay readable by whoever held the old key, which is inherent: they were
   delivered.
 - **Channel names** are an HMAC of the session id under an account-wide channel key, as `PROTOCOL.md` asks, so the hub
-  cannot join a session to box traffic by name.
+  cannot join a session to box traffic by name. As built (`ChannelKey::channel`): HMAC-SHA256 over
+  `"wmlhub/channel/v1" || purpose || 0x00 || subject`, truncated to 16 bytes, where `purpose` separates a session's
+  events from its keys. Two accounts watching the same box get different channel names for it.
 - **Box telemetry** is the same shape with the box connector as publisher: the "group key per box" the spec
   describes is this stream key.
 

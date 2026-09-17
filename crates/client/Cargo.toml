@@ -1,0 +1,24 @@
+[package]
+name = "wmlhub-client"
+version = "0.1.0"
+description = "A client for the window.ml hub: the authenticated handshake, subscriptions, and sealed commands"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+tokio = { version = "1", features = ["macros", "rt", "time"] }
+tokio-tungstenite = "0.30"
+wmlhub-keys = { path = "../keys" }
+wmlhub-proto = { path = "../proto" }
+wmlhub-seal = { path = "../seal" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+wmlhub = { path = "../hub" }
+
+[lints]
+workspace = true
