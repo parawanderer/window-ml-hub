@@ -22,7 +22,8 @@ In order. Each step lands as its own PR with CI green. Design questions are answ
    envelope, signed commands with nonces and a clock window. Lives in the clients: a Rust client library here, the
    extension's connector in window-ml. Commands and results, published streams (stream keys,
    wrapping, signed batches) and keyed channel names: `crates/seal`. The Rust client, with end-to-end tests that drive
-   a real hub: `crates/client`. Next: vectors shared with the extension's WebCrypto implementation.
+   a real hub: `crates/client`. Vectors for a second implementation: `vectors/seal-v1.json`
+   ([VECTORS.md](VECTORS.md)); the extension's own vectors come back the other way when its connector is built.
 7. **The box connector mode.** Schema vendored ([SCHEMAS.md](SCHEMAS.md)); relay rules in
    [design/box-connector.md](design/box-connector.md).
 8. **The extension's connector** in window-ml's background worker. Last, and coordinated with the chat page work,
