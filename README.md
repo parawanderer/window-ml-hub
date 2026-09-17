@@ -61,7 +61,7 @@ Which repository owns which wire schema, and how the others pin it: [`docs/SCHEM
 | `crates/proto` | the wire types generated from `proto/wmlhub/v1/hub.proto` (no `protoc` needed) |
 | `crates/hub` | the `wmlhub` binary: the websocket server around the relay |
 | `crates/relay` | the routing core with no IO: accounts, presence, streams and rings, backpressure, limits |
-| `proto/` | the hub's wire schema; rules in [`docs/PROTOCOL.md`](docs/PROTOCOL.md) |
+| `proto/` | the hub's wire schema (rules in [`docs/PROTOCOL.md`](docs/PROTOCOL.md)); `proto/vendor/` holds pinned copies of other repos' schemas |
 | `tools/mv3-ws-probe` | the probe that showed a websocket keeps an MV3 service worker alive |
 | `tools/webcrypto-probe` | the probe listing which WebCrypto primitives an MV3 service worker has |
 | `docs/` | roadmap, protocol, schema ownership, design proposals, findings |

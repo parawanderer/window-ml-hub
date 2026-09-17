@@ -19,7 +19,8 @@ In order. Each step lands as its own PR with CI green. Design questions are answ
 6. **Keys, pairing and end-to-end encryption.** Proposal: HPKE-style boxes on WebCrypto (every primitive is native in
    the MV3 worker, [finding](findings/webcrypto-in-mv3-worker.md)), stream keys wrapped per device, signed commands
    with nonces and a clock window. Awaiting a decision.
-7. **The box connector mode.** Needs the BoxFrame schema from the ollama fork ([SCHEMAS.md](SCHEMAS.md)).
+7. **The box connector mode.** Schema vendored ([SCHEMAS.md](SCHEMAS.md)); relay rules in
+   [design/box-connector.md](design/box-connector.md).
 8. **The extension's connector** in window-ml's background worker. Last, and coordinated with the chat page work,
    because both talk to `background.ts`.
 9. **Push for approvals** on a sleeping phone, carrying only "an approval is waiting".
