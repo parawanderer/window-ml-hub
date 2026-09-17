@@ -209,8 +209,8 @@ impl Model {
                     to: Some(To::Channel(vec![b'c', channel % CHANNELS])),
                     kind: kind as i32,
                     sender: if forge_sender { principal_bytes((s.principal + 1) % PRINCIPALS) } else { Vec::new() },
-                    coalesce: if coalesce % 3 == 0 { Vec::new() } else { vec![coalesce % 3] },
-                    payload: self.tagged(s, size),
+                    coalesce: if coalesce % 3 == 0 { Vec::new().into() } else { vec![coalesce % 3].into() },
+                    payload: self.tagged(s, size).into(),
                     ..Default::default()
                 };
                 self.hub.receive(s.conn, Frame { body: Some(Body::Envelope(env)) })
@@ -223,8 +223,8 @@ impl Model {
                     let env = Envelope {
                         to: Some(To::Channel(vec![b'c', channel % CHANNELS])),
                         kind: Kind::Telemetry as i32,
-                        coalesce: if k % 3 == 0 { Vec::new() } else { vec![k % 3] },
-                        payload: self.tagged(s, k % 16),
+                        coalesce: if k % 3 == 0 { Vec::new().into() } else { vec![k % 3].into() },
+                        payload: self.tagged(s, k % 16).into(),
                         ..Default::default()
                     };
                     actions.extend(self.hub.receive(s.conn, Frame { body: Some(Body::Envelope(env)) }));
@@ -262,7 +262,7 @@ impl Model {
                 let env = Envelope {
                     to: Some(To::Principal(principal_bytes(to % PRINCIPALS))),
                     kind: kind as i32,
-                    payload: self.tagged(s, size),
+                    payload: self.tagged(s, size).into(),
                     r#ref: u64::from(size),
                     ..Default::default()
                 };
@@ -274,7 +274,17 @@ impl Model {
             }
             Op::Drain { slot, budget } => {
                 let Some(s) = self.slot(slot) else { return self.check() };
-                let frames = self.hub.take_outbound(s.conn, usize::from(budget));
+                let wires = self.hub.take_outbound(s.conn, usize::from(budget));
+                let mut frames = Vec::with_capacity(wires.len());
+                for w in &wires {
+                    // each item is exactly one encoded frame
+                    let mut decoded =
+                        wmlhub_proto::decode_frames(w, usize::MAX).map_err(|e| format!("queued bytes: {e}"))?;
+                    if decoded.len() != 1 {
+                        return Err(format!("a queued item held {} frames", decoded.len()));
+                    }
+                    frames.push(decoded.remove(0));
+                }
                 self.judge_deliveries(s, &frames)?;
                 Vec::new()
             }
@@ -293,7 +303,7 @@ impl Model {
                     _ => Some(Body::Envelope(Envelope {
                         to: Some(To::Channel(vec![b'c', 0])),
                         kind: Kind::Telemetry as i32,
-                        coalesce: vec![1; 9],
+                        coalesce: vec![1; 9].into(),
                         ..Default::default()
                     })),
                 };

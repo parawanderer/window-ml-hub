@@ -6,10 +6,12 @@ pub mod v1 {
     include!(concat!(env!("OUT_DIR"), "/wmlhub.v1.rs"));
 }
 
+pub use bytes;
 pub use prost;
 
+use bytes::{BufMut, Bytes, BytesMut};
 use prost::Message;
-use wmlhub_frame::{FrameError, write_frame};
+use wmlhub_frame::{FrameError, read_varint, write_frame};
 
 /// Why bytes off the wire are not a sequence of frames.
 #[derive(Debug)]
@@ -40,6 +42,50 @@ pub fn encode_frames(frames: &[v1::Frame], max: usize) -> Result<Vec<u8>, FrameE
     Ok(out)
 }
 
+/// Encode one frame for the wire, length prefix included, in a single allocation. The result is what a relay queues,
+/// retains and fans out: every subscriber shares these bytes.
+pub fn encode_frame(frame: &v1::Frame) -> Bytes {
+    let len = frame.encoded_len();
+    let mut buf = BytesMut::with_capacity(len + prost::length_delimiter_len(len));
+    frame.encode_length_delimited(&mut buf).expect("capacity reserved for the whole frame");
+    buf.freeze()
+}
+
+/// Decode one whole websocket message into its frames without copying payloads: each `Envelope.payload` (and
+/// `coalesce`) is a slice of `message`, kept alive by reference count.
+pub fn decode_frames_shared(message: Bytes, max: usize) -> Result<Vec<v1::Frame>, DecodeError> {
+    let mut frames = Vec::new();
+    let mut at = 0;
+    while at < message.len() {
+        let Some((len, head)) = read_varint(&message[at..]).map_err(DecodeError::Frame)? else {
+            return Err(DecodeError::Frame(FrameError::Truncated { pending: message.len() - at }));
+        };
+        if len > max as u64 {
+            return Err(DecodeError::Frame(FrameError::TooLarge { len, max }));
+        }
+        let start = at + head;
+        let end = start.checked_add(len as usize).filter(|e| *e <= message.len());
+        let Some(end) = end else {
+            return Err(DecodeError::Frame(FrameError::Truncated { pending: message.len() - at }));
+        };
+        frames.push(v1::Frame::decode(message.slice(start..end)).map_err(DecodeError::Proto)?);
+        at = end;
+    }
+    Ok(frames)
+}
+
+/// Join already-encoded frames into one websocket message. One frame is passed through without copying.
+pub fn join_frames(mut frames: Vec<Bytes>) -> Bytes {
+    if frames.len() == 1 {
+        return frames.pop().expect("one frame");
+    }
+    let mut buf = BytesMut::with_capacity(frames.iter().map(Bytes::len).sum());
+    for f in &frames {
+        buf.put_slice(f);
+    }
+    buf.freeze()
+}
+
 /// Decode one whole websocket message into its frames. A websocket message is already complete, so a message that
 /// ends mid-frame is corruption here, not a short read.
 pub fn decode_frames(message: &[u8], max: usize) -> Result<Vec<v1::Frame>, DecodeError> {
@@ -62,10 +108,38 @@ mod tests {
                 to: Some(v1::envelope::To::Channel(b"ch".to_vec())),
                 kind: Kind::SessionEvents as i32,
                 seq,
-                payload: vec![0xde, 0xad],
+                payload: Bytes::from_static(&[0xde, 0xad]),
                 ..Default::default()
             })),
         }
+    }
+
+    #[test]
+    fn shared_decoding_agrees_with_copying_decoding_and_shares_the_payload() {
+        let frames = vec![published(1), published(2)];
+        let bytes = encode_frames(&frames, 1 << 16).unwrap();
+        let message = Bytes::from(bytes.clone());
+        let shared = decode_frames_shared(message.clone(), 1 << 16).unwrap();
+        assert_eq!(shared, decode_frames(&bytes, 1 << 16).unwrap());
+        let Some(Body::Envelope(e)) = &shared[0].body else { panic!("envelope") };
+        // a slice of the message, not a copy
+        let range = message.as_ptr() as usize..message.as_ptr() as usize + message.len();
+        assert!(range.contains(&(e.payload.as_ptr() as usize)));
+    }
+
+    #[test]
+    fn encode_frame_then_join_is_the_same_bytes_as_encode_frames() {
+        let frames = vec![published(1), published(2), Frame { body: Some(Body::Ping(v1::Ping { nonce: 9 })) }];
+        let joined = join_frames(frames.iter().map(encode_frame).collect());
+        assert_eq!(joined.as_ref(), encode_frames(&frames, 1 << 16).unwrap().as_slice());
+    }
+
+    #[test]
+    fn shared_decoding_refuses_what_copying_decoding_refuses() {
+        let bytes = encode_frames(&[published(1)], 1 << 16).unwrap();
+        assert!(decode_frames_shared(Bytes::from(bytes[..bytes.len() - 1].to_vec()), 1 << 16).is_err());
+        assert!(decode_frames_shared(Bytes::from_static(&[0xff; 11]), 1 << 16).is_err());
+        assert!(decode_frames_shared(Bytes::from(bytes.clone()), 3).is_err());
     }
 
     #[test]

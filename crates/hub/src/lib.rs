@@ -20,7 +20,7 @@ use tokio::sync::{Notify, Semaphore};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use wmlhub_proto::v1::{self, Frame, error::Code, frame::Body};
-use wmlhub_proto::{decode_frames, encode_frames};
+use wmlhub_proto::{decode_frames_shared, encode_frames, join_frames};
 use wmlhub_relay::{AccountId, Action, ConnId, Hub, Limits};
 
 use registry::{Refusal, Registry};
@@ -276,7 +276,7 @@ async fn connection(shared: Arc<Shared>, tcp: TcpStream, address: IpAddr) {
     }
     let first = tokio::time::timeout(shared.config.hello_timeout, stream.next()).await;
     let Ok(Some(Ok(Message::Binary(bytes)))) = first else { return };
-    let mut frames = match decode_frames(&bytes, max_frame) {
+    let mut frames = match decode_frames_shared(bytes, max_frame) {
         Ok(f) => f.into_iter(),
         Err(_) => {
             let _ = send(&mut sink, &[error_frame(Code::Invalid, "malformed frame")], max_frame).await;
@@ -326,7 +326,8 @@ async fn connection(shared: Arc<Shared>, tcp: TcpStream, address: IpAddr) {
             }
         };
         let close_with = match next {
-            Ok(Some(Ok(Message::Binary(bytes)))) => match decode_frames(&bytes, max_frame) {
+            // payloads stay slices of this message all the way into the relay's encoded entry
+            Ok(Some(Ok(Message::Binary(bytes)))) => match decode_frames_shared(bytes, max_frame) {
                 Ok(f) => {
                     pending = f;
                     continue;
@@ -374,14 +375,21 @@ async fn write_loop(shared: Arc<Shared>, shard: usize, id: ConnId, handle: Arc<H
                 }
             }
         }
+        // Feed every batch that is ready, then flush once: one write per wake-up however much was queued. A single
+        // queued frame is sent as the relay's own bytes, uncopied.
+        let mut fed = false;
         loop {
-            let frames = lock(&shared.shards[shard]).hub.take_outbound(id, shared.config.write_budget);
-            if frames.is_empty() {
+            let wires = lock(&shared.shards[shard]).hub.take_outbound(id, shared.config.write_budget);
+            if wires.is_empty() {
                 break;
             }
-            if send(&mut sink, &frames, max_frame).await.is_err() {
+            if sink.feed(Message::Binary(join_frames(wires))).await.is_err() {
                 return;
             }
+            fed = true;
+        }
+        if fed && sink.flush().await.is_err() {
+            return;
         }
         let closing = lock(&handle.closing).take();
         if let Some(frame) = closing {

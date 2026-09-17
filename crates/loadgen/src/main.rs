@@ -250,32 +250,34 @@ async fn fanout(
                 } else if tokio::time::Instant::now() > scheduled + Duration::from_millis(10) {
                     late.fetch_add(1, Ordering::Relaxed);
                 }
-                let mut frames = Vec::with_capacity(batch);
+                let mut bodies = Vec::with_capacity(batch);
                 for _ in 0..batch.min((total - i) as usize) {
-                    let at = (scheduled + period * (frames.len() as u32)).into_std();
+                    let at = (scheduled + period * (bodies.len() as u32)).into_std();
                     let micros = at.saturating_duration_since(epoch).as_micros() as u64;
                     let mut body = vec![0u8; payload.max(16)];
                     body[..8].copy_from_slice(&micros.to_le_bytes());
-                    frames.push(Frame {
-                        body: Some(Body::Envelope(Envelope {
-                            to: Some(To::Channel(format!("ch{}", i as usize % channels).into_bytes())),
-                            kind: Kind::SessionEvents as i32,
-                            payload: body,
-                            ..Default::default()
-                        })),
-                    });
+                    bodies.push((i as usize % channels, body));
                     i += 1;
                 }
-                sent.fetch_add(frames.len() as u64, Ordering::Relaxed);
+                sent.fetch_add(bodies.len() as u64, Ordering::Relaxed);
                 let now = tokio::time::Instant::now();
                 lag.saturating_record((now - scheduled).as_micros() as u64 + 1);
                 // bytes 8..16: when the message was actually handed to the socket, for the hub-only latency
                 let actual = now.into_std().saturating_duration_since(epoch).as_micros() as u64;
-                for f in &mut frames {
-                    if let Some(Body::Envelope(e)) = &mut f.body {
-                        e.payload[8..16].copy_from_slice(&actual.to_le_bytes());
-                    }
-                }
+                let frames: Vec<Frame> = bodies
+                    .into_iter()
+                    .map(|(channel, mut body)| {
+                        body[8..16].copy_from_slice(&actual.to_le_bytes());
+                        Frame {
+                            body: Some(Body::Envelope(Envelope {
+                                to: Some(To::Channel(format!("ch{channel}").into_bytes())),
+                                kind: Kind::SessionEvents as i32,
+                                payload: body.into(),
+                                ..Default::default()
+                            })),
+                        }
+                    })
+                    .collect();
                 if ws.send(Message::binary(encode_frames(&frames, MAX).unwrap())).await.is_err() {
                     break;
                 }

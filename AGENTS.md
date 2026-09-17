@@ -88,6 +88,11 @@ and every result so far: [`docs/perf/README.md`](docs/perf/README.md).
   non-interactive shell may not read. Prefix the command with `. "$HOME/.cargo/env" &&`.
 - **tungstenite's default read buffer is 128 KiB per connection.** Leaving it cost ~110 KB per idle connection; the
   hub sets 8 KiB (`READ_BUFFER_BYTES`). Any new websocket endpoint must set it too.
+- **Never compare memory with a power-of-two payload.** macOS rounds 16,448 bytes to 20,480; a 16,384-byte payload
+  that fits a size class in one layout and misses it by 64 bytes in another makes the allocator the variable. Use
+  sizes like 16,000 or 18,000.
+- **Relay queues and rings hold ENCODED frames (`Bytes`).** A published envelope is encoded once in `Ring::publish`;
+  add metadata the queue needs beside the bytes (as `Entry` does), never by decoding them.
 - **On macOS, tokio's timer adds about 1 ms** to anything scheduled. A latency measured from a schedule includes it;
   `wmlhub-loadgen` reports it separately as `send lag`.
 - **An attached debugger keeps an MV3 service worker alive.** Any experiment about worker lifetime must run Chromium

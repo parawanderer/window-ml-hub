@@ -12,6 +12,9 @@ mod queue;
 mod ring;
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use wmlhub_proto::bytes::Bytes;
 
 use wmlhub_proto::v1::{self, Envelope, Frame, Kind, Role, envelope::To, error::Code, frame::Body};
 
@@ -62,8 +65,10 @@ struct Conn {
     subs: HashSet<StreamKey>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Stream {
+    /// shared with every queued item of this stream, so a delivery never clones the key's bytes
+    key: Arc<StreamKey>,
     /// absent until the first publish decides the stream's kind
     ring: Option<Ring>,
     subscribers: HashSet<ConnId>,
@@ -188,10 +193,10 @@ impl Hub {
         let mut conn = Conn { principal: hello.principal.clone(), out: Outbound::default(), subs: HashSet::new() };
         let welcome = v1::Welcome { protocol: PROTOCOL, server_time_ms: now_ms, limits: Some(self.limits.announce()) };
         // A fresh queue holds these without trouble; a failure here would be a limits misconfiguration.
-        let _ = conn.out.push_frame(Frame { body: Some(Body::Welcome(welcome)) }, &self.limits);
+        let _ = conn.out.push_frame(&Frame { body: Some(Body::Welcome(welcome)) }, &self.limits);
         for (principal, (_, r)) in &acct.online {
             let p = v1::Presence { principal: principal.clone(), role: *r as i32, online: true };
-            let _ = conn.out.push_frame(Frame { body: Some(Body::Presence(p)) }, &self.limits);
+            let _ = conn.out.push_frame(&Frame { body: Some(Body::Presence(p)) }, &self.limits);
         }
         let others: Vec<ConnId> = acct.conns.keys().copied().collect();
         acct.conns.insert(id, conn);
@@ -246,7 +251,8 @@ impl Hub {
     }
 
     /// Frames queued for a connection, oldest first, up to about `budget` bytes.
-    pub fn take_outbound(&mut self, conn: ConnId, budget: usize) -> Vec<Frame> {
+    /// Each item is one encoded frame, length prefix included, ready to be joined into a websocket message.
+    pub fn take_outbound(&mut self, conn: ConnId, budget: usize) -> Vec<Bytes> {
         let Some(account) = self.conn_account.get(&conn) else { return Vec::new() };
         self.accounts
             .get_mut(account)
@@ -319,22 +325,23 @@ impl Hub {
             Kind::SessionEvents => self.limits.ring_session_events,
             _ => self.limits.ring_telemetry,
         };
+        let limits = &self.limits;
         let acct = self.accounts.get_mut(account).expect("connection's account exists");
-        let stream = acct.streams.get_mut(&key).expect("ensured above");
+        let Account { conns, streams, ring_bytes, .. } = acct;
+        let stream = streams.get_mut(&key).expect("ensured above");
         let ring = stream.ring.get_or_insert_with(|| Ring::new(kind, epoch, clock));
-        let added = if capacity > 0 { env.payload.len() } else { 0 };
-        let (stamped, freed) = ring.publish(env, capacity, clock);
-        acct.ring_bytes = acct.ring_bytes + added - freed;
-        let subscribers: Vec<ConnId> = stream.subscribers.iter().copied().collect();
-        Self::enforce_ring_budget(acct, self.limits.account_ring_bytes);
-
-        for sub in subscribers {
-            let Some(c) = acct.conns.get_mut(&sub) else { continue };
-            match c.out.push_published(&key, stamped.clone(), &self.limits) {
+        let epoch = ring.epoch;
+        // stamped and encoded once; every subscriber below shares these bytes
+        let published = ring.publish(env, capacity, clock);
+        *ring_bytes = *ring_bytes + published.added - published.freed;
+        for &sub in &stream.subscribers {
+            let Some(c) = conns.get_mut(&sub) else { continue };
+            match c.out.push_published(&stream.key, kind, epoch, &published.entry, limits) {
                 Ok(()) => fx.wake(sub),
                 Err(SlowConsumer) => fx.close.push((sub, error(Code::SlowConsumer, 0, "fell behind"))),
             }
         }
+        Self::enforce_ring_budget(acct, limits.account_ring_bytes);
     }
 
     fn direct(&mut self, account: &AccountId, conn: ConnId, target: Vec<u8>, env: Envelope, fx: &mut Effects) {
@@ -348,7 +355,7 @@ impl Hub {
         env.to = Some(To::Principal(target));
         let acct = self.accounts.get_mut(account).expect("connection's account exists");
         let c = acct.conns.get_mut(&target_conn).expect("online principals have connections");
-        match c.out.push_frame(Frame { body: Some(Body::Envelope(env)) }, &self.limits) {
+        match c.out.push_frame(&Frame { body: Some(Body::Envelope(env)) }, &self.limits) {
             Ok(()) => fx.wake(target_conn),
             Err(SlowConsumer) => {
                 fx.close.push((target_conn, error(Code::SlowConsumer, 0, "fell behind")));
@@ -386,17 +393,18 @@ impl Hub {
         }
         let stream = acct.streams.get_mut(&key).expect("ensured above");
         stream.subscribers.insert(conn);
-        let (envelopes, epoch, seq, truncated) = match &stream.ring {
+        let (entries, kind, epoch, seq, truncated) = match &stream.ring {
             Some(ring) => {
                 let b = ring.backfill(sub.since.as_ref());
-                (b.envelopes, ring.epoch, ring.seq, b.truncated)
+                (b.entries, ring.kind, ring.epoch, ring.seq, b.truncated)
             }
-            None => (Vec::new(), 0, 0, sub.since.is_some_and(|p| p.seq > 0)),
+            None => (Vec::new(), Kind::Unspecified, 0, 0, sub.since.is_some_and(|p| p.seq > 0)),
         };
+        let stream_key = stream.key.clone();
         let c = acct.conns.get_mut(&conn).expect("receiving connection exists");
         c.subs.insert(key.clone());
-        for env in envelopes {
-            if c.out.push_published(&key, env, &self.limits).is_err() {
+        for entry in &entries {
+            if c.out.push_published(&stream_key, kind, epoch, entry, &self.limits).is_err() {
                 fx.close.push((conn, error(Code::SlowConsumer, 0, "fell behind")));
                 return;
             }
@@ -425,7 +433,8 @@ impl Hub {
                 acct.ring_bytes -= s.ring.map_or(0, |r| r.bytes);
             }
         }
-        acct.streams.insert(key.clone(), Stream::default());
+        acct.streams
+            .insert(key.clone(), Stream { key: Arc::new(key.clone()), ring: None, subscribers: HashSet::new() });
         true
     }
 
@@ -460,7 +469,7 @@ impl Hub {
 
     fn enqueue(&mut self, account: &AccountId, conn: ConnId, frame: Frame, fx: &mut Effects) {
         let Some(c) = self.accounts.get_mut(account).and_then(|a| a.conns.get_mut(&conn)) else { return };
-        match c.out.push_frame(frame, &self.limits) {
+        match c.out.push_frame(&frame, &self.limits) {
             Ok(()) => fx.wake(conn),
             Err(SlowConsumer) => fx.close.push((conn, error(Code::SlowConsumer, 0, "fell behind"))),
         }

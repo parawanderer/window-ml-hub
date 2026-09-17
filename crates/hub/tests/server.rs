@@ -90,7 +90,7 @@ fn envelope(to: To, kind: Kind, payload: &[u8], reference: u64) -> Frame {
         body: Some(Body::Envelope(Envelope {
             to: Some(to),
             kind: kind as i32,
-            payload: payload.to_vec(),
+            payload: payload.to_vec().into(),
             r#ref: reference,
             ..Default::default()
         })),
@@ -123,7 +123,7 @@ async fn a_published_envelope_reaches_a_subscriber_with_the_sender_stamped() {
     let Body::Envelope(e) = expect(&mut phone, |b| matches!(b, Body::Envelope(_))).await else { unreachable!() };
     assert_eq!(e.sender, b"rt");
     assert_eq!(e.seq, 1);
-    assert_eq!(e.payload, b"ciphertext");
+    assert_eq!(e.payload.as_ref(), b"ciphertext");
 }
 
 #[tokio::test]
@@ -143,10 +143,10 @@ async fn a_command_and_its_result_travel_both_ways() {
     let mut phone = join(&url, "alice", "phone", Role::Client).await;
     send(&mut phone, &[envelope(To::Principal(b"rt".to_vec()), Kind::Command, b"cancel", 1)]).await;
     let Body::Envelope(cmd) = expect(&mut rt, |b| matches!(b, Body::Envelope(_))).await else { unreachable!() };
-    assert_eq!((cmd.sender.as_slice(), cmd.payload.as_slice()), (&b"phone"[..], &b"cancel"[..]));
+    assert_eq!((cmd.sender.as_slice(), cmd.payload.as_ref()), (&b"phone"[..], &b"cancel"[..]));
     send(&mut rt, &[envelope(To::Principal(b"phone".to_vec()), Kind::CommandResult, b"ok", 1)]).await;
     let Body::Envelope(res) = expect(&mut phone, |b| matches!(b, Body::Envelope(_))).await else { unreachable!() };
-    assert_eq!(res.payload, b"ok");
+    assert_eq!(res.payload.as_ref(), b"ok");
 }
 
 #[tokio::test]

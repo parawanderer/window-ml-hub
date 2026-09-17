@@ -33,7 +33,7 @@ fn publish(channel: &str, kind: Kind, payload: &[u8]) -> Frame {
     frame(Body::Envelope(Envelope {
         to: Some(To::Channel(channel.as_bytes().to_vec())),
         kind: kind as i32,
-        payload: payload.to_vec(),
+        payload: payload.to_vec().into(),
         ..Default::default()
     }))
 }
@@ -42,7 +42,7 @@ fn command(to: &str, payload: &[u8], reference: u64) -> Frame {
     frame(Body::Envelope(Envelope {
         to: Some(To::Principal(to.as_bytes().to_vec())),
         kind: Kind::Command as i32,
-        payload: payload.to_vec(),
+        payload: payload.to_vec().into(),
         r#ref: reference,
         ..Default::default()
     }))
@@ -81,8 +81,16 @@ fn show(frames: &[Frame]) -> Vec<String> {
         .collect()
 }
 
+/// Everything queued for `conn`, decoded.
+fn drain(h: &mut Hub, conn: ConnId) -> Vec<Frame> {
+    h.take_outbound(conn, usize::MAX)
+        .iter()
+        .map(|w| wmlhub_proto::decode_frames(w, usize::MAX).unwrap().remove(0))
+        .collect()
+}
+
 fn out(h: &mut Hub, conn: ConnId) -> Vec<String> {
-    show(&h.take_outbound(conn, usize::MAX))
+    show(&drain(h, conn))
 }
 
 fn closed(actions: &[Action]) -> Vec<(ConnId, String)> {
@@ -207,14 +215,14 @@ fn resubscribing_with_a_position_sends_only_what_was_missed() {
     let rt = join(&mut h, "alice", "rt", Role::Runtime);
     let phone = join(&mut h, "alice", "phone", Role::Client);
     h.receive(phone, subscribe("rt", "s1", None));
-    let first = h.take_outbound(phone, usize::MAX);
+    let first = drain(&mut h, phone);
     let Some(Body::Backfilled(b)) = &first[0].body else { panic!("expected backfilled") };
     assert_eq!(b.epoch, 0, "no ring before the first publish");
 
     for p in [b"a", b"b", b"c"] {
         h.receive(rt, publish("s1", Kind::SessionEvents, p));
     }
-    let seen = h.take_outbound(phone, usize::MAX);
+    let seen = drain(&mut h, phone);
     let Some(Body::Envelope(e)) = &seen[0].body else { panic!("expected envelope") };
     let epoch = e.epoch;
     assert_ne!(epoch, 0);
@@ -347,16 +355,23 @@ fn a_stream_with_subscribers_is_never_evicted_and_the_publish_is_refused_instead
 
 #[test]
 fn the_account_ring_budget_takes_from_the_largest_ring() {
-    let mut h = Hub::new(Limits { account_ring_bytes: 10, ..Limits::default() }, 1).unwrap();
+    // The budget counts ENCODED bytes (what the ring actually holds). Payloads are large enough that the envelope's own
+    // few dozen bytes cannot change which ring is largest: two 200 B entries (~230 B encoded) and one 100 B (~130 B)
+    // exceed 500, and dropping the oldest of the largest ring is enough.
+    let mut h = Hub::new(Limits { account_ring_bytes: 500, ..Limits::default() }, 1).unwrap();
     let rt = join(&mut h, "alice", "rt", Role::Runtime);
     let phone = join(&mut h, "alice", "phone", Role::Client);
-    h.receive(rt, publish("big", Kind::SessionEvents, b"xxxx"));
-    h.receive(rt, publish("big", Kind::SessionEvents, b"yyyy"));
-    h.receive(rt, publish("small", Kind::SessionEvents, b"zzz"));
+    h.receive(rt, publish("big", Kind::SessionEvents, &[b'x'; 200]));
+    h.receive(rt, publish("big", Kind::SessionEvents, &[b'y'; 200]));
+    h.receive(rt, publish("small", Kind::SessionEvents, &[b'z'; 100]));
     h.receive(phone, subscribe("rt", "big", None));
-    assert_eq!(out(&mut h, phone), ["env from=rt seq=2 yyyy", "backfilled seq=2 truncated=true"]);
+    let big = drain(&mut h, phone);
+    let seqs: Vec<String> = show(&big).iter().map(|l| l.split(' ').take(3).collect::<Vec<_>>().join(" ")).collect();
+    assert_eq!(seqs, ["env from=rt seq=2", "backfilled seq=2 truncated=true"]);
     h.receive(phone, subscribe("rt", "small", None));
-    assert_eq!(out(&mut h, phone), ["env from=rt seq=1 zzz", "backfilled seq=1 truncated=false"]);
+    let small: Vec<String> =
+        out(&mut h, phone).iter().map(|l| l.split(' ').take(3).collect::<Vec<_>>().join(" ")).collect();
+    assert_eq!(small, ["env from=rt seq=1", "backfilled seq=1 truncated=false"]);
 }
 
 #[test]
