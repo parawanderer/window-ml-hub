@@ -50,10 +50,18 @@ before anything of ours is in the way.
 
 ## The other direction
 
-These vectors prove a second implementation can OPEN what this one produces. The other half (that this one opens what
-the extension produces) needs vectors from that side, because both HPKE and the signatures draw randomness that cannot
-be replayed. Produce them the same way there and check them in here; that is what a round of interoperability testing
-means for this protocol.
+`vectors/seal-ts-v1.json` is the other half: sealed by window-ml's TypeScript implementation (`src/hub`, over
+WebCrypto) and opened here by `crates/seal/tests/vectors_ts.rs`. Both files are needed because neither HPKE nor Ed25519
+lets randomness be replayed, so each side has to produce its own and the other has to open it.
+
+Regenerate it from a window-ml checkout:
+
+```bash
+node --import tsx scripts/gen-hub-vectors.mjs > ../window-ml-hub/vectors/seal-ts-v1.json
+```
+
+It uses the parties `seal-v1.json` describes, from the same seeds, so the Rust test rebuilds the cast from its own
+constants and only opens what the file carries.
 
 ## Regenerating
 
