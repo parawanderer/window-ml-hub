@@ -15,7 +15,7 @@ fn spec(subject: &Identity) -> CertSpec {
         subject: subject.public(),
         agreement_key: [9; 32],
         role: Role::Client,
-        scopes: vec![Scope::View, Scope::Drive],
+        scopes: vec![scope::VIEW.into(), scope::DRIVE.into()],
         may_pair: false,
         not_before_ms: NOW - 1000,
         not_after_ms: NOW + 1000,
@@ -53,7 +53,7 @@ fn a_tampered_body_is_refused() {
     let mut cert = issue(&root, &spec(&phone));
     // grant APPROVE by editing the encoded body; the signature no longer covers it
     let mut body = CertificateBody::decode(cert.body.as_slice()).unwrap();
-    body.scopes.push(Scope::Approve as i32);
+    body.scopes.push(scope::APPROVE.into());
     cert.body = body.encode_to_vec();
     assert_eq!(verify_chain(&root.public(), &[cert], NOW).unwrap_err(), ChainError::Signature);
 }
@@ -78,7 +78,7 @@ fn an_intermediate_without_may_pair_is_refused() {
 fn a_delegate_cannot_grant_a_scope_it_does_not_hold() {
     let (root, laptop, phone) = (id(1), id(2), id(3));
     let delegate = issue(&root, &CertSpec { may_pair: true, ..spec(&laptop) });
-    let leaf = issue(&laptop, &CertSpec { scopes: vec![Scope::View, Scope::Approve], ..spec(&phone) });
+    let leaf = issue(&laptop, &CertSpec { scopes: vec![scope::VIEW.into(), scope::APPROVE.into()], ..spec(&phone) });
     assert_eq!(verify_chain(&root.public(), &[leaf, delegate], NOW).unwrap_err(), ChainError::ScopeWidened);
 }
 
@@ -160,4 +160,85 @@ fn transcript_fields_cannot_be_shifted_between_each_other() {
     let a = hello_transcript("ab", b"c", b"p", Role::Client, &[0; 32]);
     let b = hello_transcript("a", b"bc", b"p", Role::Client, &[0; 32]);
     assert_ne!(a, b);
+}
+
+/// A leaf signed by a key the attacker holds, under a forged "delegate" whose own signature is garbage. The scope
+/// comparison used to run before the delegate's signature was checked, over unbounded lists: 250,000 scopes each
+/// (a 500 KB hello, from nobody) took 2.7 s of hub CPU on a tokio worker. Bodies are now bounded before anything else.
+fn forged_pair(delegate_scopes: Vec<String>, leaf_scopes: Vec<String>, label: &str) -> [Certificate; 2] {
+    let (root, attacker, phone) = (id(1), id(2), id(3));
+    let mut parent = CertificateBody::decode(
+        issue(&root, &CertSpec { may_pair: true, not_after_ms: 0, ..spec(&attacker) }).body.as_slice(),
+    )
+    .unwrap();
+    parent.scopes = delegate_scopes;
+    let delegate = Certificate { body: parent.encode_to_vec(), signature: vec![0; 64] };
+    let leaf =
+        issue(&attacker, &CertSpec { not_after_ms: 0, scopes: leaf_scopes, label: label.into(), ..spec(&phone) });
+    [leaf, delegate]
+}
+
+#[test]
+fn an_oversized_certificate_is_refused_before_its_scopes_are_compared() {
+    let many: Vec<String> = vec!["view".into(); 100_000];
+    let chain = forged_pair(many.clone(), many, "");
+    assert_eq!(verify_chain(&id(1).public(), &chain, NOW).unwrap_err(), ChainError::Malformed);
+}
+
+#[test]
+fn every_certificate_bound_is_enforced_at_its_edge() {
+    let root = id(1).public();
+    let names = |n: usize| (0..n).map(|i| format!("s{i}")).collect::<Vec<_>>();
+    // at the limits: refused only for the forged delegate's signature, so every bound passed
+    let at = forged_pair(names(MAX_SCOPES), names(MAX_SCOPES), &"l".repeat(MAX_LABEL_BYTES));
+    assert_eq!(verify_chain(&root, &at, NOW).unwrap_err(), ChainError::Signature);
+    let long_name = vec!["a".repeat(MAX_SCOPE_BYTES)];
+    assert_eq!(
+        verify_chain(&root, &forged_pair(long_name.clone(), long_name, ""), NOW).unwrap_err(),
+        ChainError::Signature
+    );
+    // one past each
+    for chain in [
+        forged_pair(names(MAX_SCOPES), names(MAX_SCOPES + 1), ""),
+        forged_pair(vec![], vec!["a".repeat(MAX_SCOPE_BYTES + 1)], ""),
+        forged_pair(vec![], vec![String::new()], ""),
+        forged_pair(vec![], vec![], &"l".repeat(MAX_LABEL_BYTES + 1)),
+    ] {
+        assert_eq!(verify_chain(&root, &chain, NOW).unwrap_err(), ChainError::Malformed);
+    }
+}
+
+#[test]
+fn a_scope_name_outside_the_alphabet_is_refused() {
+    let root = id(1).public();
+    for bad in ["View", "drive ", "ap\u{0}prove", "scr\neen", "é"] {
+        let chain = forged_pair(vec![], vec![bad.into()], "");
+        assert_eq!(verify_chain(&root, &chain, NOW).unwrap_err(), ChainError::Malformed, "{bad:?}");
+    }
+}
+
+#[test]
+fn a_certificate_body_over_the_byte_limit_is_refused() {
+    let (root, phone) = (id(1), id(2));
+    let mut cert = issue(&root, &spec(&phone));
+    let mut body = CertificateBody::decode(cert.body.as_slice()).unwrap();
+    body.agreement_key = vec![0; MAX_CERT_BYTES];
+    cert.body = body.encode_to_vec();
+    cert.signature = root.sign(CERT_LABEL, &cert.body);
+    assert_eq!(verify_chain(&root.public(), &[cert], NOW).unwrap_err(), ChainError::Malformed);
+}
+
+#[test]
+fn a_scope_name_no_runtime_knows_yet_verifies_and_attenuates() {
+    // The set is open: `control` is proposed, and a hub that has never heard of it must still accept it.
+    let (root, laptop, phone) = (id(1), id(2), id(3));
+    let control = || vec![scope::VIEW.to_string(), "control".to_string()];
+    let delegate = issue(&root, &CertSpec { may_pair: true, scopes: control(), ..spec(&laptop) });
+    let leaf = issue(&laptop, &CertSpec { scopes: control(), ..spec(&phone) });
+    let v = verify_chain(&root.public(), &[leaf, delegate], NOW).unwrap();
+    assert_eq!(v.leaf.scopes, control());
+    // and a delegate that does not hold it cannot pass it on
+    let narrow = issue(&root, &CertSpec { may_pair: true, scopes: vec![scope::VIEW.into()], ..spec(&laptop) });
+    let leaf = issue(&laptop, &CertSpec { scopes: control(), ..spec(&phone) });
+    assert_eq!(verify_chain(&root.public(), &[leaf, narrow], NOW).unwrap_err(), ChainError::ScopeWidened);
 }

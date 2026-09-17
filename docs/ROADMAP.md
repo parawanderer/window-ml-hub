@@ -27,4 +27,11 @@ In order. Each step lands as its own PR with CI green. Design questions are answ
    because both talk to `background.ts`.
 9. **Push for approvals** on a sleeping phone, carrying only "an approval is waiting".
 
+Open, found along the way:
+
+- **A websocket message before `Hello` may be as large as any other** (`max_frame_bytes * 4`, 4 MiB by default),
+  across up to `max_sockets` unauthenticated sockets. The certificate inside is bounded; the message carrying it is
+  not. tokio-tungstenite 0.30 has no way to raise the limit after accept, so tightening it means reading the first
+  message with a small limit and switching to a second configuration, or a pre-auth socket budget in bytes.
+
 Later: agent-to-agent (lineage, spawn grants), headless runtimes, WebTransport.
