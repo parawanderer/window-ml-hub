@@ -38,6 +38,9 @@ pub enum Auth {
     },
 }
 
+/// Initial read buffer per connection. See `connection`.
+const READ_BUFFER_BYTES: usize = 8 << 10;
+
 /// How the server behaves around the relay.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -136,9 +139,16 @@ pub async fn serve(listener: TcpListener, config: Config, epoch_seed: u64) -> io
 }
 
 async fn connection(shared: Arc<Shared>, tcp: TcpStream, address: IpAddr) {
+    // Frames are small and latency-sensitive; Nagle would hold one back waiting for an ACK.
+    let _ = tcp.set_nodelay(true);
     let limits = &shared.config.limits;
     let max_message = limits.max_frame_bytes.saturating_mul(4);
-    let ws_config = WebSocketConfig::default().max_message_size(Some(max_message)).max_frame_size(Some(max_message));
+    // tungstenite's default read buffer is 128 KiB per connection, which made an idle connection cost ~110 KB of
+    // resident memory (1 GiB at 10k). Frames are small; the buffer grows for a large message when one arrives.
+    let ws_config = WebSocketConfig::default()
+        .max_message_size(Some(max_message))
+        .max_frame_size(Some(max_message))
+        .read_buffer_size(READ_BUFFER_BYTES);
     let Ok(ws) = tokio_tungstenite::accept_async_with_config(tcp, Some(ws_config)).await else { return };
     let (mut sink, mut stream) = ws.split();
     let max_frame = limits.max_frame_bytes;

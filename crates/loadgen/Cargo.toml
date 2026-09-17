@@ -1,0 +1,20 @@
+[package]
+name = "wmlhub-loadgen"
+version = "0.1.0"
+description = "Load generator for the window.ml hub: throughput, latency percentiles, memory per connection"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+hdrhistogram = { version = "7", default-features = false }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "sync", "time", "process"] }
+tokio-tungstenite = "0.30"
+wmlhub-proto = { path = "../proto" }
+
+[lints]
+workspace = true

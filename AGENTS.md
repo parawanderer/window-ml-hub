@@ -35,6 +35,24 @@ Read before changing the relay: [`RUNTIME_HUB.md`](https://github.com/parawander
 - **Runtimes and connectors dial out.** The hub never opens a connection to a runtime or a box.
 - **No `unsafe`** (forbidden at the workspace level).
 
+## How this repository is built
+
+This is infrastructure plumbing, and it is judged like it: what one message costs, what a hostile peer can do, what
+happens when a subscriber stalls, and whether the answers are proven. It is not judged by how extensible its type
+hierarchy looks.
+
+- **Extensibility lives in the wire formats** (versioned schemas, additive fields, capability flags), not in
+  indirection. Concrete types, plain functions and enums. No trait with one implementation, no factories, managers,
+  strategy registries or dependency injection. An abstraction arrives with its second real user.
+- **Every resource has a named bound, per tenant.** A shared lock or queue on a path every account uses is a tenancy
+  bug as well as a performance one.
+- **Know the hot path's cost in numbers**: CPU per message, bytes per idle connection, copies and syscalls per
+  delivery.
+- **Measure before changing, with spread**: `wmlhub-loadgen`, three or more runs per variant, before/after tables in the
+  PR and a row in [`docs/perf/README.md`](docs/perf/README.md). A number that got worse goes in the PR with the trade.
+  Profile before deciding where time goes.
+- **Dependencies are liabilities**: few, well known, justified in the PR.
+
 ## Schemas
 
 Each wire schema lives beside its encoder and is pinned by commit and git blob everywhere else:
@@ -51,10 +69,20 @@ Each wire schema lives beside its encoder and is pinned by commit and git blob e
 - A format another implementation must agree with (the framing, later the envelope) gets shared byte vectors in its
   tests, checked against the other side once when written.
 
+## Measuring
+
+`wmlhub-loadgen` (`crates/loadgen`) starts a release hub as a child process and drives it: `fanout` for throughput,
+latency percentiles and CPU per delivery, `idle` for memory per connection. How to read its three latency figures,
+and every result so far: [`docs/perf/README.md`](docs/perf/README.md).
+
 ## Traps
 
 - **`cargo: command not found` in an agent shell.** rustup puts `. "$HOME/.cargo/env"` in the login profile, which a
   non-interactive shell may not read. Prefix the command with `. "$HOME/.cargo/env" &&`.
+- **tungstenite's default read buffer is 128 KiB per connection.** Leaving it cost ~110 KB per idle connection; the
+  hub sets 8 KiB (`READ_BUFFER_BYTES`). Any new websocket endpoint must set it too.
+- **On macOS, tokio's timer adds about 1 ms** to anything scheduled. A latency measured from a schedule includes it;
+  `wmlhub-loadgen` reports it separately as `send lag`.
 - **An attached debugger keeps an MV3 service worker alive.** Any experiment about worker lifetime must run Chromium
   with no CDP or Playwright attached, and include an idle control that shows eviction. See
   `docs/findings/mv3-websocket-lifetime.md`.
