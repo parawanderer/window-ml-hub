@@ -27,6 +27,13 @@ Requested 2026-09-17 (mlbox `inbox/ui-api/handover-events-schema.md`), built the
 fork commit `aa1536a0`, blob `7a842b72`. A protobuf *encoding* for this stream had been declined on 2026-09-13, rightly,
 when window.ml was its only consumer; this is a schema for the NDJSON, which did not change.
 
+**Binary since fork `76f8af97`** (2026-09-17). The same schema is served as varint-length-delimited protobuf when a
+client sends `Accept: application/protobuf` (response `Content-Type: application/protobuf; delimited=varint`, gzip
+still optional); a client that does not ask keeps getting NDJSON. The binary encoder is driven by the JSON one and
+refuses a field the schema lacks, so the two encodings cannot drift apart. It exists so one encoding travels box to
+connector to hub to client with no decode and re-encode anywhere; the size difference (about 29 bytes a frame after
+gzip) was never the reason. The schema blob did not change, so the pin above stands.
+
 What a consumer needs to know from it:
 
 - **One flat `EventFrame` with `kind` as a string**, because that is what is sent. The kind list at the top of the file
@@ -35,8 +42,8 @@ What a consumer needs to know from it:
   reported". Everything else is implicit presence, where absent and zero are the same fact. The fork's test enforces
   this against the Go encoder by reflection, over 301 JSON paths.
 - **`ps` and `info` are fully typed**, not opaque JSON. `estimate.breakdown` and `activity` are marked `UNSTABLE`.
-- **`backfilled` is `null` on every frame that is not a `hello`** (the only null on the wire). Treat null and absent
-  alike.
+- **`backfilled` is `null` on every frame that is not a `hello`** (the only null on the NDJSON wire). Treat null and
+  absent alike; in the binary encoding they are the same thing.
 - **`t` is milliseconds since that connection's `hello`**, negative for backfill; absolute time is `serverTime + t`.
 - **Backfill needs `?since=<ms>`** (a duration). Without it a hello reports `backfilled: 0` and replays nothing.
 
