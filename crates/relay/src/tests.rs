@@ -489,3 +489,80 @@ fn eviction_costs() {
     });
     eprintln!("refill one ring then a maximal payload, repeated: worst {worst:?} mean {mean:?}");
 }
+
+fn budgeted(rate: usize) -> Hub {
+    let limits = Limits { account_bytes_per_second: rate, account_burst_bytes: rate, ..Limits::default() };
+    Hub::new(limits, 7).unwrap()
+}
+
+#[test]
+fn an_accounts_work_budget_is_shared_by_its_connections_and_no_one_elses() {
+    let mut h = budgeted(10_000);
+    let (a1, a2, b) = (
+        join(&mut h, "a", "rt", Role::Runtime),
+        join(&mut h, "a", "phone", Role::Client),
+        join(&mut h, "b", "rt", Role::Runtime),
+    );
+    assert_eq!(h.charge(a1, 0, 5).0, 0, "the first charge starts the account's clock");
+    assert_eq!(h.charge(b, 0, 5).0, 0);
+    assert_eq!(h.charge(a1, 10_000, 1_005).0, 0, "a full second's rate, earned since");
+    assert_eq!(h.charge(a2, 5_000, 1_005).0, 500, "the other connection pays the same account's debt");
+    assert_eq!(h.charge(b, 10_000, 1_005).0, 0, "another account is untouched");
+}
+
+#[test]
+fn a_new_account_starts_with_no_budget_even_after_being_forgotten() {
+    let mut h = budgeted(10_000);
+    let rt = join(&mut h, "a", "rt", Role::Runtime);
+    h.charge(rt, 0, 0);
+    assert_eq!(h.charge(rt, 10_000, 60_000).0, 0, "a minute in, capped at one second's burst");
+    h.close(rt, None);
+    assert!(!h.has_account(&acct("a")), "nothing retained, so the relay forgot the account");
+    let rt = join(&mut h, "a", "rt", Role::Runtime);
+    assert_eq!(h.charge(rt, 10_000, 60_000).0, 1_000, "coming back is not a fresh burst");
+}
+
+#[test]
+fn frames_the_relay_queues_are_charged_to_the_account_that_caused_them() {
+    let mut h = budgeted(1_000_000);
+    let rt = join(&mut h, "a", "rt", Role::Runtime);
+    let subs: Vec<ConnId> = (0..10).map(|i| join(&mut h, "a", &format!("c{i}"), Role::Client)).collect();
+    for &s in &subs {
+        h.receive(s, subscribe("rt", "ch", None));
+        h.take_outbound(s, usize::MAX);
+    }
+    let tokens = |h: &Hub| h.accounts[&acct("a")].rate.tokens();
+    let before = tokens(&h);
+    h.receive(rt, publish("ch", Kind::SessionEvents, b"x"));
+    assert_eq!(before - tokens(&h), 10 * FRAME_COST_BYTES as i64, "one queued frame per subscriber");
+    // a resubscribe backfills: one entry and the Backfilled marker
+    let before = tokens(&h);
+    h.receive(subs[0], subscribe("rt", "ch", None));
+    assert_eq!(before - tokens(&h), 2 * FRAME_COST_BYTES as i64);
+}
+
+#[test]
+fn a_zero_work_rate_is_a_configuration_error() {
+    let zero = Limits { account_bytes_per_second: 0, ..Limits::default() };
+    assert!(Hub::new(zero, 7).is_err());
+}
+
+#[test]
+fn a_throttled_connection_is_told_once_every_ten_seconds_and_stays_open() {
+    let mut h = budgeted(1_000);
+    let rt = join(&mut h, "a", "rt", Role::Runtime);
+    assert_eq!(h.charge(rt, 0, 0), (0, Vec::new()));
+    assert!(out(&mut h, rt).is_empty(), "not in debt: nothing to say");
+    assert_eq!(h.charge(rt, 99, 0).0, 99);
+    assert!(out(&mut h, rt).is_empty(), "a wait under 100 ms is not worth a notice");
+    h.charge(rt, 0, 99);
+    let throttled = |h: &mut Hub| out(h, rt).iter().filter(|l| l.contains("Throttled")).count();
+    let mut notices = 0;
+    for ms in (0..=25_000).step_by(100) {
+        let (wait, actions) = h.charge(rt, 10_000, ms);
+        assert!(wait > 0);
+        assert!(closed(&actions).is_empty(), "throttling never closes");
+        notices += throttled(&mut h);
+    }
+    assert_eq!(notices, 3, "at 0, 10 and 20 seconds");
+}

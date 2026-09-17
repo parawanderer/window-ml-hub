@@ -12,7 +12,7 @@ use std::io;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -21,7 +21,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use wmlhub_proto::v1::{self, Frame, error::Code, frame::Body};
 use wmlhub_proto::{decode_frames_shared, encode_frames, join_frames};
-use wmlhub_relay::{AccountId, Action, ConnId, Hub, Limits};
+use wmlhub_relay::{AccountId, Action, ConnId, FRAME_COST_BYTES, Hub, Limits};
 
 use registry::{Refusal, Registry};
 
@@ -42,6 +42,10 @@ pub enum Auth {
 
 /// Initial read buffer per connection. See `connection`.
 const READ_BUFFER_BYTES: usize = 8 << 10;
+
+/// Frames handed to the relay per lock. A websocket message may carry thousands of small frames; taking the shard for
+/// all of them at once would make the accounts sharing it wait for the whole message.
+const RECEIVE_CHUNK: usize = 16;
 
 /// How the server behaves around the relay.
 #[derive(Debug, Clone)]
@@ -104,6 +108,8 @@ struct Shared {
     /// same shard as someone else's.
     shard_hasher: RandomState,
     config: Config,
+    /// the monotonic clock accounts' work budgets run on
+    started: Instant,
 }
 
 /// A poisoned lock means a panic mid-update; the relay's state is then not trustworthy, so fail loudly.
@@ -112,6 +118,11 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Shared {
+    /// Milliseconds on the monotonic clock the relay's work budgets use.
+    fn clock_ms(&self) -> u64 {
+        u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
     fn shard_of(&self, account: &AccountId) -> usize {
         (self.shard_hasher.hash_one(&account.0) % self.shards.len() as u64) as usize
     }
@@ -231,7 +242,13 @@ pub async fn serve(listener: TcpListener, config: Config, epoch_seed: u64) -> io
         .collect::<io::Result<Vec<_>>>()?
         .into_boxed_slice();
     let sockets = Arc::new(Semaphore::new(config.max_sockets));
-    let shared = Arc::new(Shared { shards, accounts: AtomicUsize::new(0), shard_hasher: RandomState::new(), config });
+    let shared = Arc::new(Shared {
+        shards,
+        accounts: AtomicUsize::new(0),
+        shard_hasher: RandomState::new(),
+        config,
+        started: Instant::now(),
+    });
     loop {
         let (tcp, peer) = listener.accept().await?;
         let Ok(permit) = sockets.clone().try_acquire_owned() else {
@@ -276,6 +293,7 @@ async fn connection(shared: Arc<Shared>, tcp: TcpStream, address: IpAddr) {
     }
     let first = tokio::time::timeout(shared.config.hello_timeout, stream.next()).await;
     let Ok(Some(Ok(Message::Binary(bytes)))) = first else { return };
+    let hello_bytes = bytes.len();
     let mut frames = match decode_frames_shared(bytes, max_frame) {
         Ok(f) => f.into_iter(),
         Err(_) => {
@@ -312,9 +330,46 @@ async fn connection(shared: Arc<Shared>, tcp: TcpStream, address: IpAddr) {
 
     // --- frames that rode along with Hello, then the read loop ---
     let mut pending: Vec<Frame> = frames.collect();
+    // charged with the whole message they came in, hello included
+    let mut pending_bytes = hello_bytes;
     'read: loop {
-        for frame in pending.drain(..) {
-            shared.on_shard(shard, |hub| ((), hub.receive(id, frame)));
+        if !pending.is_empty() {
+            // Charge the account chunk by chunk, each for its share of the message, and hand each chunk over once its
+            // cost is covered. In debt, stop reading this connection until the debt is repaid: the peer's sends back up
+            // in TCP, and nothing is dropped. Charging the whole message up front made a throttled account's work
+            // arrive in bursts of a whole message, and its neighbours' p99 paid for them (docs/perf/README.md).
+            let frames = pending.len();
+            let mut bytes_left = pending_bytes;
+            let mut rest = std::mem::take(&mut pending).into_iter();
+            loop {
+                let chunk: Vec<Frame> = rest.by_ref().take(RECEIVE_CHUNK).collect();
+                if chunk.is_empty() {
+                    break;
+                }
+                let share = if rest.len() == 0 { bytes_left } else { pending_bytes / frames * chunk.len() };
+                bytes_left -= share;
+                let cost = share.saturating_add(chunk.len().saturating_mul(FRAME_COST_BYTES));
+                let now = shared.clock_ms();
+                // charged and handed over under one lock, so an unthrottled chunk costs no extra lock
+                let (wait, unsent) = shared.on_shard(shard, |hub| {
+                    let (wait, mut actions) = hub.charge(id, cost, now);
+                    if wait > 0 {
+                        return ((wait, chunk), actions);
+                    }
+                    actions.extend(chunk.into_iter().flat_map(|f| hub.receive(id, f)));
+                    ((0, Vec::new()), actions)
+                });
+                if wait > 0 {
+                    tokio::select! {
+                        () = tokio::time::sleep(Duration::from_millis(wait)) => {}
+                        _ = &mut writer => {
+                            writer_done = true;
+                            break 'read;
+                        }
+                    }
+                    shared.on_shard(shard, |hub| ((), unsent.into_iter().flat_map(|f| hub.receive(id, f)).collect()));
+                }
+            }
         }
         let next = tokio::select! {
             next = tokio::time::timeout(shared.config.idle_timeout, stream.next()) => next,
@@ -327,12 +382,13 @@ async fn connection(shared: Arc<Shared>, tcp: TcpStream, address: IpAddr) {
         };
         let close_with = match next {
             // payloads stay slices of this message all the way into the relay's encoded entry
-            Ok(Some(Ok(Message::Binary(bytes)))) => match decode_frames_shared(bytes, max_frame) {
-                Ok(f) => {
+            Ok(Some(Ok(Message::Binary(bytes)))) => match (bytes.len(), decode_frames_shared(bytes, max_frame)) {
+                (len, Ok(f)) => {
                     pending = f;
+                    pending_bytes = len;
                     continue;
                 }
-                Err(_) => error_frame(Code::Invalid, "malformed frame"),
+                (_, Err(_)) => error_frame(Code::Invalid, "malformed frame"),
             },
             // tungstenite answers websocket-level pings itself; either still counts as traffic
             Ok(Some(Ok(Message::Ping(_) | Message::Pong(_)))) => continue,

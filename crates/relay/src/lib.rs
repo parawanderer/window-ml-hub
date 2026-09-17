@@ -9,6 +9,7 @@ mod limits;
 #[cfg(any(test, feature = "testing"))]
 pub mod model;
 mod queue;
+mod rate;
 mod ring;
 
 use std::collections::{HashMap, HashSet};
@@ -20,7 +21,15 @@ use wmlhub_proto::v1::{self, Envelope, Frame, Kind, Role, envelope::To, error::C
 
 pub use limits::Limits;
 use queue::{Outbound, SlowConsumer};
+use rate::Bucket;
+pub use rate::FRAME_COST_BYTES;
 use ring::Ring;
+
+/// The least time between two `Error{THROTTLED}` notices to one connection.
+pub const THROTTLE_NOTICE_MS: u64 = 10_000;
+/// The shortest wait worth telling a connection about. A new account starts with nothing banked, so its first messages
+/// wait a millisecond or so; announcing that would greet every fresh account with a throttle notice.
+pub const THROTTLE_NOTICE_MIN_WAIT_MS: u64 = 100;
 
 /// The protocol major this relay speaks.
 pub const PROTOCOL: u32 = 1;
@@ -76,11 +85,15 @@ struct Conn {
     subs: HashSet<StreamKey>,
     /// a `Wake` was sent and this connection's queue has not been seen empty since
     armed: bool,
+    /// when this connection was last told it is being throttled, on the server's monotonic clock
+    throttle_notice_ms: Option<u64>,
 }
 
 impl Conn {
-    /// Wake the connection unless a wake is already outstanding. Every successful push goes through here.
+    /// Count a queued frame, and wake the connection unless a wake is already outstanding. Every successful push goes
+    /// through here, except a backfill's entries, which are counted where they are pushed.
     fn arm(&mut self, id: ConnId, fx: &mut Effects) {
+        fx.queued += 1;
         if !self.armed {
             self.armed = true;
             fx.wake(id);
@@ -97,12 +110,26 @@ struct Stream {
     subscribers: HashSet<ConnId>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Account {
     conns: HashMap<ConnId, Conn>,
     online: HashMap<Vec<u8>, (ConnId, Role)>,
     streams: HashMap<StreamKey, Stream>,
     ring_bytes: usize,
+    /// work this account may cause, shared by all its connections (rate.rs)
+    rate: Bucket,
+}
+
+impl Account {
+    fn new() -> Self {
+        Self {
+            conns: HashMap::new(),
+            online: HashMap::new(),
+            streams: HashMap::new(),
+            ring_bytes: 0,
+            rate: Bucket::new(),
+        }
+    }
 }
 
 /// The relay's whole state.
@@ -121,6 +148,8 @@ pub struct Hub {
 struct Effects {
     wake: Vec<ConnId>,
     close: Vec<(ConnId, Frame)>,
+    /// frames queued for any connection, charged to the account whose frame caused them
+    queued: usize,
 }
 
 impl Effects {
@@ -146,6 +175,9 @@ impl Hub {
     pub fn with_id_space(limits: Limits, epoch_seed: u64, shard: u16) -> Result<Self, ConfigError> {
         if limits.ring_session_events > limits.queue_session_events {
             return Err(ConfigError("a session-events backfill must fit in a connection's queue"));
+        }
+        if limits.account_bytes_per_second == 0 || limits.account_burst_bytes == 0 {
+            return Err(ConfigError("an account's work rate and burst must be positive"));
         }
         if limits.max_payload_bytes >= limits.max_frame_bytes {
             return Err(ConfigError("a payload must fit in a frame with its envelope"));
@@ -208,13 +240,18 @@ impl Hub {
             }
         }
         // created only once every check has passed, so a refused hello leaves nothing behind
-        let acct = self.accounts.entry(account.clone()).or_default();
+        let acct = self.accounts.entry(account.clone()).or_insert_with(Account::new);
 
         let id = self.next_conn;
         self.next_conn += 1;
         let mut fx = Effects::default();
-        let mut conn =
-            Conn { principal: hello.principal.clone(), out: Outbound::default(), subs: HashSet::new(), armed: false };
+        let mut conn = Conn {
+            principal: hello.principal.clone(),
+            out: Outbound::default(),
+            subs: HashSet::new(),
+            armed: false,
+            throttle_notice_ms: None,
+        };
         let welcome = v1::Welcome { protocol: PROTOCOL, server_time_ms: now_ms, limits: Some(self.limits.announce()) };
         // A fresh queue holds these without trouble; a failure here would be a limits misconfiguration.
         let _ = conn.out.push_frame(&Frame { body: Some(Body::Welcome(welcome)) }, &self.limits);
@@ -259,6 +296,10 @@ impl Hub {
             }
             None => self.enqueue(&account, conn, error(Code::Unsupported, 0, "unknown frame"), &mut fx),
         }
+        // what this frame made the relay queue, fanned out or backfilled, is work the account caused
+        if let Some(a) = self.accounts.get_mut(&account) {
+            a.rate.spend(fx.queued.saturating_mul(FRAME_COST_BYTES));
+        }
         self.finish(fx)
     }
 
@@ -272,6 +313,35 @@ impl Hub {
             self.forget(conn, &mut fx);
         }
         self.finish(fx)
+    }
+
+    /// Charge a connection's account for a websocket message it sent (`bytes` includes [`FRAME_COST_BYTES`] per frame)
+    /// at the server's monotonic `now_ms`. Returns how many milliseconds to stop reading that connection before handing
+    /// the message's frames to [`Hub::receive`] (0: go ahead), and actions: a connection told to wait at least
+    /// [`THROTTLE_NOTICE_MIN_WAIT_MS`] is sent `Error{THROTTLED}`, at most once every [`THROTTLE_NOTICE_MS`]. The debt covers this message, so after the wait it
+    /// is processed without charging again. An unknown connection costs nothing.
+    pub fn charge(&mut self, conn: ConnId, bytes: usize, now_ms: u64) -> (u64, Vec<Action>) {
+        let (rate, burst) = (self.limits.account_bytes_per_second, self.limits.account_burst_bytes);
+        let Some(account) = self.conn_account.get(&conn) else { return (0, Vec::new()) };
+        let Some(a) = self.accounts.get_mut(account) else { return (0, Vec::new()) };
+        a.rate.refill(now_ms, rate, burst);
+        a.rate.spend(bytes);
+        let wait = a.rate.wait_ms(rate);
+        let mut fx = Effects::default();
+        if wait >= THROTTLE_NOTICE_MIN_WAIT_MS {
+            if let Some(c) = a.conns.get_mut(&conn) {
+                let due = c.throttle_notice_ms.is_none_or(|t| now_ms.saturating_sub(t) >= THROTTLE_NOTICE_MS);
+                if due {
+                    c.throttle_notice_ms = Some(now_ms);
+                    let notice = error(Code::Throttled, 0, "account over its work rate; reading slowed");
+                    match c.out.push_frame(&notice, &self.limits) {
+                        Ok(()) => c.arm(conn, &mut fx),
+                        Err(SlowConsumer) => fx.close.push((conn, error(Code::SlowConsumer, 0, "fell behind"))),
+                    }
+                }
+            }
+        }
+        (wait, self.finish(fx))
     }
 
     /// Frames queued for a connection, oldest first, up to about `budget` bytes. When nothing is left the connection
@@ -435,6 +505,7 @@ impl Hub {
                 fx.close.push((conn, error(Code::SlowConsumer, 0, "fell behind")));
                 return;
             }
+            fx.queued += 1;
         }
         let done = v1::Backfilled { stream: Some(key.to_ref()), epoch, seq, truncated };
         self.enqueue(account, conn, Frame { body: Some(Body::Backfilled(done)) }, fx);

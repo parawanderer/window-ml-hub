@@ -122,6 +122,9 @@ Every setting is an environment variable. The compose file sets the first four; 
 | `WMLHUB_STATE_DIR` | `/data` in the image | where accounts and invites are kept |
 | `WMLHUB_OPEN_PER_ADDRESS` | `3` | open mode: new accounts per source address per hour |
 | `WMLHUB_OPEN_TOTAL` | `60` | open mode: new accounts overall per hour |
+| `WMLHUB_ACCOUNT_BYTES_PER_SECOND` | `8388608` (8 MiB) | work one account may cause per second; past it the hub reads that account more slowly, dropping nothing |
+| `WMLHUB_ACCOUNT_BURST_BYTES` | `33554432` (32 MiB) | how much of that work may arrive at once |
+| `WMLHUB_SHARDS` | `0` (four per core) | independent relay locks; accounts are spread across them |
 
 `docker compose exec hub wmlhub serve --help` prints the same list.
 

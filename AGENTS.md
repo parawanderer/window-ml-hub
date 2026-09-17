@@ -24,7 +24,11 @@ Read before changing the relay: [`RUNTIME_HUB.md`](https://github.com/parawander
 - **Never log payload bytes**, and log envelope fields only as routing needs them. Sizes and timings are the most the
   hub may record about traffic, and the spec already counts those as what a compromised hub learns.
 - **Every buffer, queue and ring is bounded by a named constant**, and every limit is per account. One account must
-  not be able to starve another.
+  not be able to starve another, of memory or of time: work an account causes is charged to its budget (rate.rs),
+  including frames the relay queues on its behalf. A new code path that makes the relay queue frames goes through
+  `Conn::arm`, which counts them.
+- **The relay takes one clock per purpose.** `connect` gets wall-clock time (it goes into `Welcome`); `charge` gets
+  the server's monotonic clock, and the work budget reads nothing else. Mixing them left a bucket that never refilled.
 - **Nothing is addressable across accounts.** Every lookup that finds a principal, a runtime or a ring is keyed by
   account first. A global map keyed by runtime id alone is a bug even though ids are unique.
 - **No database.** Rings are a cache; the authority is on the runtimes and boxes. A lost node is a reconnect. The one

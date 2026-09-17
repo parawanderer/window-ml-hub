@@ -188,6 +188,35 @@ wmlhub-relay eviction_costs -- --ignored --nocapture`), per publish:
   takes its shard's lock from the others on it whether or not it evicts anything. That is fairness, recorded in
   `docs/ROADMAP.md`, not an eviction question.
 
+### A work budget per account
+
+Every other bound is on memory; nothing bounded time, so an account publishing as fast as its sockets allowed held its
+shard's lock as often as it liked. Each account now has a byte budget (8 MiB/s, 32 MiB burst by default; rate.rs):
+messages at their size plus 64 bytes a frame, and 64 bytes per frame queued on its behalf. Past it the hub stops
+reading the account's connection until the debt is repaid; nothing is dropped. Measured with `wmlhub-loadgen fanout
+--flooders 8 --hub-env WMLHUB_SHARDS=1`: 9 accounts x 5 subscribers at 200 msg/s each, sharing one shard with 8
+accounts that each publish as fast as the hub reads them (batches of 256 x 512 B). Figures are the 9 accounts'.
+
+| build | rounds | transit p50 | transit p90 | transit p99 | hub CPU | flood, per account |
+| --- | --- | --- | --- | --- | --- | --- |
+| no flooders (floor) | 3 | 264-296 us | 480-520 us | 0.70-0.91 ms | 15-18% | |
+| no budget (`main`) | 3 | 775-831 us | 1.39-1.51 ms | 1.9-2.1 ms | 241-261% | 64-68k envelopes/s |
+| budget, charged per message | 6 | 274-320 us | 1.25-2.46 ms | **2.8-4.7 ms** | 34-42% | 13.1-13.7k envelopes/s |
+| budget, charged per 16 frames (shipped) | 6 | 330-638 us | 0.81-1.33 ms | 1.2-2.0 ms | 41-63% | 13.2-13.7k envelopes/s |
+| per 16 frames, sleeping only on 4 ms of debt | 3 | 372-603 us | 0.89-1.40 ms | 2.2-2.3 ms | 36-59% | 13.2-13.6k envelopes/s |
+
+- **The budget holds each flooder to its rate** (13.3k envelopes of about 630 B of work each is 8.4 MiB/s) and takes
+  the hub from two and a half cores to under one.
+- **How it is charged decides the tail.** Charging a whole 256-frame message up front made a throttled account sleep
+  about 20 ms and then do 20 ms of work at once; eight flooders waking on the same timer ticks put their bursts in the
+  neighbours' p99, worse than no budget at all. Charging every 16 frames spreads the same work out: p99 is back to
+  what it was without a budget. Median and CPU move between rounds more than between the two variants.
+- Sleeping only once 4 ms of debt had built up, to wake flooders less often, bought nothing measurable.
+
+No cost when under budget: `fanout --accounts 50 --subscribers 5 --channels 4 --rate 2000` (500k deliveries/s, about
+1.9 MiB/s of work per account), before -> after, three rounds each: hub CPU per 1k deliveries 4.6-4.8 -> 4.6-4.9 us,
+transit p50 624-634 -> 623-634 us, p99 1.4-2.4 -> 1.5-1.9 ms.
+
 ## Next (from the profile)
 
 1. ~~Shard the relay by account, so tenants do not share a lock.~~ Done, above.
@@ -195,4 +224,4 @@ wmlhub-relay eviction_costs -- --ignored --nocapture`), per publish:
 3. ~~Bounded-cost eviction.~~ Measured above: bounded and amortized; no change.
 4. ~~Fewer syscalls per message on the write path.~~ Measured above: set by delivery rate, not by the hub.
 5. Fixed-size ids: about 2% of samples at 500k deliveries/s. Deferred.
-6. Per-account publish rate, so one account cannot hold its shard's lock at will (`docs/ROADMAP.md`).
+6. ~~Per-account publish rate.~~ Done, above.
