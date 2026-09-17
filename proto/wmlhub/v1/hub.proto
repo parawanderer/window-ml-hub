@@ -82,7 +82,8 @@ enum Kind {
   KIND_COMMAND = 3;
   // Direct, the answer to a command; as KIND_COMMAND.
   KIND_COMMAND_RESULT = 4;
-  // Direct, not retained, never queued behind a limit: a large object in chunks (a screenshot).
+  // Direct, not retained: a large object in chunks (a screenshot). Counts toward the recipient's queue like any
+  // direct envelope.
   KIND_BULK = 5;
 }
 

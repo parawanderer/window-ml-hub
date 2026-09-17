@@ -6,6 +6,8 @@ pub mod v1 {
     include!(concat!(env!("OUT_DIR"), "/wmlhub.v1.rs"));
 }
 
+pub use prost;
+
 use prost::Message;
 use wmlhub_frame::{FrameError, write_frame};
 

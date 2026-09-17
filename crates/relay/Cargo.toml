@@ -1,0 +1,15 @@
+[package]
+name = "wmlhub-relay"
+version = "0.1.0"
+description = "The window.ml hub's routing core: accounts, streams, rings and backpressure, with no IO"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+wmlhub-proto = { path = "../proto" }
+
+[lints]
+workspace = true
