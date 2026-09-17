@@ -1,0 +1,12 @@
+[package]
+name = "wmlhub-frame"
+version = "0.1.0"
+description = "Varint-delimited framing for the window.ml hub's protobuf streams"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
