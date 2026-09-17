@@ -12,19 +12,18 @@ schema is vendored at `proto/vendor/ollama/api/events.proto`; see [`../SCHEMAS.m
   built.
 - Connect with `?since=<ms>` sized to what the connector may have missed, and check `retainedMs` on the hello: the
   ring may reach less far back than asked.
-- **Time is the open problem for verbatim relay.** `t` is milliseconds since the connector's own `hello`, which a
-  client that joins later never saw, and rewriting `t` would mean re-encoding. Asked of the fork (mlbox
-  `inbox/ui-api/handover-events-binary-relay.md`): an absolute timestamp on every frame. Until it exists the connector
-  publishes each connection's `hello` on the edge channel, and clients resolve `t` against the latest `hello` they
-  hold.
-- `dropped` counts what the connector itself lost on the box link. It is the box's count, not the connector's: keep a
-  separate count of anything the connector coalesces, so no gap is ever drawn as a flat line.
+- **Every frame carries `at_ms`** (field 30, fork `10b026a3`): wall-clock Unix milliseconds of when the event
+  happened, including on a backfilled frame. So a frame is self-contained and relays verbatim. Clients place frames on
+  a timeline with `at_ms` and measure durations with `t`, which is monotonic within one connection but relative to
+  that connection's `hello`. `at_ms` can step when the box's clock is stepped.
 
 ## Reading a frame without decoding it
 
 Coalescing needs two facts per frame: its `kind` (field 2) and, for a `sample`, whether it carries `info` (field 28).
 The connector reads them by walking the frame's top-level tags (a varint key, then skip the value by its wire type)
-and decodes nothing else. `kind` is in the schema's stability list; `info` has been asked to be. A frame whose tags do
+and decodes nothing else. Both are in the schema's stability list, and **field numbers are never reused or
+renumbered**: the envelope is `v` 1, `kind` 2, `t` 3, `serverTime` 5, `box` 6, `retainedMs` 7, `backfilled` 8,
+`dropped` 29, `at_ms` 30, with `ps` 27 and `info` 28 the two large message fields. A frame whose tags do
 not parse is relayed on the lossless channel as it is, never dropped: an unreadable frame is a question for the
 client, not a reason for the relay to lose it.
 
@@ -57,13 +56,19 @@ So the connector publishes on **two channels per box**:
 
 A client merges the two by absolute time, which is why `t` is converted on ingest.
 
+## Sizes, skips and reasons
+
+- **Frame size**: about 2.1 KB of base plus about 1.6 KB per resident model (NDJSON; binary is smaller), always largest
+  on a `sample`. Nothing is capped server-side, but the loaded-model limit bounds it: about 12 KB at six models. The
+  relay's 1 MiB payload limit has two orders of magnitude of room.
+- **An unencodable frame is skipped and counted in `dropped`**, and the stream continues. It is a build defect the
+  fork's lockstep test should make unreachable. `dropped` therefore means "frames this subscriber did not receive",
+  from a full buffer or a skip alike.
+- **`unload` carries a `reason`**: `expired`, `requested`, `displaced`, `leased`, `load-failed` or `oom-retry`. Absent
+  or unrecognised means the server did not say. It is still an edge: never coalesced, never dropped.
+
 ## Open
 
-- An absolute timestamp per frame (asked); until then, the `hello` travels on the edge channel.
-- The largest frame the box emits (asked), against the relay's 1 MiB payload limit.
-- What the binary stream does if the encoder refuses a frame (asked): the connector must not reconnect in a loop.
-
-- Captures of `evict`, `load.failed` and `lease.*` for conformance vectors: the fork maintainer offered to record them
-  when the box is idle.
+- Captures of `evict`, `load.failed` and `lease.*` for conformance vectors, when the box is idle.
 - Whether real captures can be committed to this public repository: they carry model names, hardware details and
   request hints.

@@ -24,7 +24,9 @@ plaintext before encrypting it, and needs the frame kinds to coalesce samples an
 ## BoxFrame: owned by the fork
 
 Requested 2026-09-17 (mlbox `inbox/ui-api/handover-events-schema.md`), built the same day: `api/events.proto` at
-fork commit `aa1536a0`, blob `7a842b72`. A protobuf *encoding* for this stream had been declined on 2026-09-13, rightly,
+fork commit `aa1536a0`, blob `7a842b72`. Re-pinned the same day to `10b026a3`, blob `aecfdd88`, which added `at_ms`
+(field 30), `memory_host` (18), a reason on `unload`, and `info` and field-number stability to the schema's
+stability note. A protobuf *encoding* for this stream had been declined on 2026-09-13, rightly,
 when window.ml was its only consumer; this is a schema for the NDJSON, which did not change.
 
 **Binary since fork `76f8af97`** (2026-09-17). The same schema is served as varint-length-delimited protobuf when a
@@ -32,7 +34,7 @@ client sends `Accept: application/protobuf` (response `Content-Type: application
 still optional); a client that does not ask keeps getting NDJSON. The binary encoder is driven by the JSON one and
 refuses a field the schema lacks, so the two encodings cannot drift apart. It exists so one encoding travels box to
 connector to hub to client with no decode and re-encode anywhere; the size difference (about 29 bytes a frame after
-gzip) was never the reason. The schema blob did not change, so the pin above stands.
+gzip) was never the reason. The binary encoding itself changed no schema; later additions are additive (see the re-pin above).
 
 What a consumer needs to know from it:
 
