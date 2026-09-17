@@ -1,0 +1,20 @@
+[package]
+name = "wmlhub-proto"
+version = "0.1.0"
+description = "Generated Rust types for the window.ml hub's wire protocol (proto/wmlhub/v1)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+prost = "0.14"
+wmlhub-frame = { path = "../frame" }
+
+[build-dependencies]
+prost-build = "0.14"
+protox = "0.9"
+
+[lints]
+workspace = true

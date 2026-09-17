@@ -9,7 +9,7 @@ stream (`src/proto/chat.proto.pin.json`); every schema here follows the same pat
 
 | Schema | Owner (the encoder) | Read by | Status |
 | --- | --- | --- | --- |
-| **Envelope** and the hub's own control messages (hello, subscribe, backfill, errors) | this repository, `proto/` | window-ml's hub connector and hub client | to be written with the relay |
+| **Envelope** and the hub's own control messages (hello, subscribe, backfill, errors) | this repository, `proto/wmlhub/v1/hub.proto` ([PROTOCOL.md](PROTOCOL.md)) | window-ml's hub connector and hub client | draft, version 1 |
 | **Session payloads**: `SessionHost` shapes and `MlDebugEvent` | window-ml, `src/session-host.ts`, `src/contract.ts` | clients only | JSON inside the ciphertext for contract version 1 ([`SESSION_CONTRACT.md` §On the wire](https://github.com/parawanderer/window-ml/blob/main/docs/spec/SESSION_CONTRACT.md)) |
 | **BoxFrame**: the box's `/api/events` stream | parawanderer/ollama `slop`, beside `server/events.go` | window-ml's resource panel, this repository's box connector | proposed, see below |
 | **Chat stream** | parawanderer/ollama `slop`, `middleware/chat.proto` | window-ml | exists and pinned |
@@ -19,6 +19,10 @@ is part of how that stays true. The box connector is the exception, and it is a 
 plaintext before encrypting it, and needs the frame kinds to coalesce samples and find the box id in `hello`.
 
 ## BoxFrame: ask the box to own a proto
+
+**Requested 2026-09-17** (mlbox `inbox/ui-api/handover-events-schema.md`). A protobuf *encoding* for this stream was
+declined on 2026-09-13, rightly, when window.ml was its only consumer; the request is for a schema, with the NDJSON
+unchanged.
 
 The patched Ollama emits `/api/events` as NDJSON today, and window-ml parses it by hand. The box connector will read
 the same stream, in Rust. Proposal, for the ollama fork's maintainer to accept or change:
