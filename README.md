@@ -59,6 +59,7 @@ Which repository owns which wire schema, and how the others pin it: [`docs/SCHEM
 | --- | --- |
 | `crates/frame` | varint-delimited framing, byte-compatible with window-ml's `src/protostream.ts` |
 | `crates/proto` | the wire types generated from `proto/wmlhub/v1/hub.proto` (no `protoc` needed) |
+| `crates/relay` | the routing core with no IO: accounts, presence, streams and rings, backpressure, limits |
 | `proto/` | the hub's wire schema; rules in [`docs/PROTOCOL.md`](docs/PROTOCOL.md) |
 | `tools/mv3-ws-probe` | the probe that showed a websocket keeps an MV3 service worker alive |
 | `docs/` | roadmap, schema ownership, findings |

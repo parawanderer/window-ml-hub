@@ -40,10 +40,13 @@ is keyed by the connection's account first.
 | `TELEMETRY` | a channel of the sender | ring | coalesced by `coalesce`, then dropped with a `Gap` |
 | `COMMAND` | a principal | no | never dropped; recipient offline: `Error{UNAVAILABLE}` to the sender |
 | `COMMAND_RESULT` | a principal | no | as `COMMAND` |
-| `BULK` | a principal | no | chunks of a large object (a screenshot); kept out of the rings and the event queues |
+| `BULK` | a principal | no | as `COMMAND`; chunks of a large object (a screenshot), never retained |
 
 The direction is part of the kind: a published kind must name a channel and a direct kind a principal, or the hub
 answers `Error{INVALID}`.
+
+**A direct envelope that would overflow its recipient's queue** closes the recipient as a slow consumer and answers
+the sender `Error{UNAVAILABLE}`: never dropped silently, never held.
 
 **Commands are not stored and forwarded.** A command is signed with a clock window, so one delivered after a delay
 would be refused anyway; and holding them would make the hub a database of commands. The sender learns immediately

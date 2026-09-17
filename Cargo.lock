@@ -537,3 +537,10 @@ dependencies = [
  "protox",
  "wmlhub-frame",
 ]
+
+[[package]]
+name = "wmlhub-relay"
+version = "0.1.0"
+dependencies = [
+ "wmlhub-proto",
+]
