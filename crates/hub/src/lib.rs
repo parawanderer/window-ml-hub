@@ -376,17 +376,20 @@ async fn write_loop(shared: Arc<Shared>, shard: usize, id: ConnId, handle: Arc<H
             }
         }
         // Feed every batch that is ready, then flush once: one write per wake-up however much was queued. A single
-        // queued frame is sent as the relay's own bytes, uncopied.
+        // queued frame is sent as the relay's own bytes, uncopied. The relay wakes a connection once per drain, not
+        // once per frame, so keep taking until it says nothing is left: stopping early would strand what remains.
         let mut fed = false;
         loop {
-            let wires = lock(&shared.shards[shard]).hub.take_outbound(id, shared.config.write_budget);
-            if wires.is_empty() {
+            let taken = lock(&shared.shards[shard]).hub.take_outbound(id, shared.config.write_budget);
+            if !taken.frames.is_empty() {
+                if sink.feed(Message::Binary(join_frames(taken.frames))).await.is_err() {
+                    return;
+                }
+                fed = true;
+            }
+            if !taken.more {
                 break;
             }
-            if sink.feed(Message::Binary(join_frames(wires))).await.is_err() {
-                return;
-            }
-            fed = true;
         }
         if fed && sink.flush().await.is_err() {
             return;

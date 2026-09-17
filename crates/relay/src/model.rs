@@ -18,7 +18,7 @@
 //! - **closing**: a connection the relay closed is forgotten;
 //! - and, implicitly, no panic.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use arbitrary::{Arbitrary, Unstructured};
 use wmlhub_proto::v1::{self, Envelope, Frame, Kind, Role, envelope::To, frame::Body};
@@ -129,6 +129,8 @@ pub struct Model {
     /// epochs seen per stream, so `Subscribe { since }` can name a real one
     epochs: Vec<u64>,
     counter: u32,
+    /// connections sent an `Action::Wake` and not drained to empty since: what a server waiting on wakes would know
+    woken: HashSet<ConnId>,
 }
 
 fn principal_bytes(p: u8) -> Vec<u8> {
@@ -149,6 +151,7 @@ impl Model {
             last_seq: HashMap::new(),
             epochs: Vec::new(),
             counter: 0,
+            woken: HashSet::new(),
         }
     }
 
@@ -274,9 +277,13 @@ impl Model {
             }
             Op::Drain { slot, budget } => {
                 let Some(s) = self.slot(slot) else { return self.check() };
-                let wires = self.hub.take_outbound(s.conn, usize::from(budget));
-                let mut frames = Vec::with_capacity(wires.len());
-                for w in &wires {
+                let taken = self.hub.take_outbound(s.conn, usize::from(budget));
+                if !taken.more {
+                    // a server drains until `more` is false, then waits for the next wake
+                    self.woken.remove(&s.conn);
+                }
+                let mut frames = Vec::with_capacity(taken.frames.len());
+                for w in &taken.frames {
                     // each item is exactly one encoded frame
                     let mut decoded =
                         wmlhub_proto::decode_frames(w, usize::MAX).map_err(|e| format!("queued bytes: {e}"))?;
@@ -324,9 +331,15 @@ impl Model {
 
     fn judge_actions(&mut self, actions: &[Action]) -> Result<(), String> {
         for action in actions {
-            if let Action::Close { conn, .. } = action {
-                if self.hub.conn_account.contains_key(conn) {
-                    return Err(format!("closed connection {conn} is still known to the relay"));
+            match action {
+                Action::Close { conn, .. } => {
+                    if self.hub.conn_account.contains_key(conn) {
+                        return Err(format!("closed connection {conn} is still known to the relay"));
+                    }
+                    self.woken.remove(conn);
+                }
+                Action::Wake(conn) => {
+                    self.woken.insert(*conn);
                 }
             }
         }
@@ -379,6 +392,14 @@ impl Model {
         let l = &self.limits;
         if self.hub.accounts.len() > l.max_accounts {
             return Err(format!("{} accounts over the limit", self.hub.accounts.len()));
+        }
+        // No lost wake-ups: anything queued has a wake outstanding, or a server waiting on wakes never sends it.
+        for acct in self.hub.accounts.values() {
+            for (conn, c) in &acct.conns {
+                if !c.out.is_empty() && !self.woken.contains(conn) {
+                    return Err(format!("connection {conn} has frames queued and no wake outstanding"));
+                }
+            }
         }
         for (id, acct) in &self.hub.accounts {
             if acct.conns.is_empty() && acct.streams.is_empty() {
