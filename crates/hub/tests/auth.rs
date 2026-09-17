@@ -12,7 +12,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use wmlhub::registry::{OpenLimits, Registration, Registry};
 use wmlhub_keys::{CertSpec, Identity, account_id, hello_transcript, issue, principal_id, sign_hello};
-use wmlhub_proto::v1::{self, Certificate, Envelope, Frame, Kind, Role, Scope, envelope::To, error::Code, frame::Body};
+use wmlhub_proto::v1::{self, Certificate, Envelope, Frame, Kind, Role, envelope::To, error::Code, frame::Body};
 use wmlhub_proto::{decode_frames, encode_frames};
 
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -50,7 +50,7 @@ fn device(root: &Identity, seed: u8, role: Role) -> Device {
         subject: key.public(),
         agreement_key: [5; 32],
         role,
-        scopes: vec![Scope::View, Scope::Drive],
+        scopes: vec![wmlhub_keys::scope::VIEW.into(), wmlhub_keys::scope::DRIVE.into()],
         may_pair: false,
         not_before_ms: 0,
         not_after_ms: 0,

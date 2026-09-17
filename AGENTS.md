@@ -31,6 +31,9 @@ Read before changing the relay: [`RUNTIME_HUB.md`](https://github.com/parawander
   thing on disk is operator state (registered account ids, outstanding invites) in a state directory, one file each.
 - **A claim on disk is an exclusive create** (`create_new`), never a remove or a rename: claiming an invite by
   removing its file let one invite register up to three accounts in a 16-thread race on macOS.
+- **Anything read before authentication is bounded before it is iterated or compared.** A certificate's scopes were
+  compared pairwise before the forged delegate's signature was checked, with no bound on either list: a 500 KB hello
+  from nobody cost 2.7 s of CPU on a tokio worker. `MAX_CERT_BYTES`, `MAX_SCOPES` and friends are checked first.
 - **Every hello verification failure looks the same on the wire.** Log the reason; do not send it.
 - **Runtimes and connectors dial out.** The hub never opens a connection to a runtime or a box.
 - **No `unsafe`** (forbidden at the workspace level).

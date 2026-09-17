@@ -3,8 +3,8 @@
 #![no_main]
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
-use wmlhub_keys::{CertSpec, Identity, issue, verify_chain};
-use wmlhub_proto::v1::{Certificate, Role, Scope};
+use wmlhub_keys::{CertSpec, Identity, issue, scope, verify_chain};
+use wmlhub_proto::v1::{Certificate, Role};
 
 fuzz_target!(|data: &[u8]| {
     let mut u = Unstructured::new(data);
@@ -35,7 +35,7 @@ fuzz_target!(|data: &[u8]| {
         subject: subject.public(),
         agreement_key: [7; 32],
         role: Role::Client,
-        scopes: vec![Scope::View],
+        scopes: vec![scope::VIEW.into()],
         may_pair,
         not_before_ms: 0,
         not_after_ms: 0,

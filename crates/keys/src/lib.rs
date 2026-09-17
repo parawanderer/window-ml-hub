@@ -10,13 +10,34 @@
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
 use wmlhub_proto::prost::Message;
-use wmlhub_proto::v1::{Certificate, CertificateBody, Role, Scope};
+use wmlhub_proto::v1::{Certificate, CertificateBody, Role};
 
 /// An Ed25519 public key.
 pub type PublicKey = [u8; 32];
 
 /// The longest chain accepted: a leaf issued by the root, or by one delegate the root allowed to pair.
 pub const MAX_CHAIN: usize = 2;
+
+/// The largest encoded certificate body accepted. Checked before decoding: a hello is read before its sender is
+/// authenticated, so nothing in it may cost more than its size allows. A body with every field at its limit is about
+/// 750 bytes.
+pub const MAX_CERT_BYTES: usize = 1024;
+/// The most scopes one certificate may carry. Attenuation compares each against the issuer's, so this bounds that too.
+pub const MAX_SCOPES: usize = 16;
+/// The longest scope name.
+pub const MAX_SCOPE_BYTES: usize = 32;
+/// The longest label.
+pub const MAX_LABEL_BYTES: usize = 64;
+
+/// The scope names runtimes know today (window-ml docs/spec/RUNTIME_HUB.md §Principals and scopes). The set is open:
+/// a certificate may carry a name that is not here, and it verifies.
+pub mod scope {
+    pub const VIEW: &str = "view";
+    pub const DRIVE: &str = "drive";
+    pub const APPROVE: &str = "approve";
+    pub const SCREEN: &str = "screen";
+    pub const DESKTOP: &str = "desktop";
+}
 
 const CERT_LABEL: &[u8] = b"wmlhub/cert/v1\0";
 const HELLO_LABEL: &[u8] = b"wmlhub/hello/v1\0";
@@ -75,7 +96,7 @@ pub struct CertSpec {
     pub subject: PublicKey,
     pub agreement_key: [u8; 32],
     pub role: Role,
-    pub scopes: Vec<Scope>,
+    pub scopes: Vec<String>,
     pub may_pair: bool,
     pub not_before_ms: u64,
     /// 0 means no expiry
@@ -90,7 +111,7 @@ pub fn issue(issuer: &Identity, spec: &CertSpec) -> Certificate {
         agreement_key: spec.agreement_key.to_vec(),
         issuer: issuer.public().to_vec(),
         role: spec.role as i32,
-        scopes: spec.scopes.iter().map(|s| *s as i32).collect(),
+        scopes: spec.scopes.clone(),
         may_pair: spec.may_pair,
         not_before_ms: spec.not_before_ms,
         not_after_ms: spec.not_after_ms,
@@ -107,7 +128,8 @@ pub fn issue(issuer: &Identity, spec: &CertSpec) -> Certificate {
 pub enum ChainError {
     /// no certificates, or more than [`MAX_CHAIN`]
     Length,
-    /// a certificate or key did not decode, or a key is not 32 bytes
+    /// a certificate or key did not decode, a key is not 32 bytes, or a body, scope list, scope name or label is
+    /// over its limit or a scope name has a character outside `a-z 0-9 . _ -`
     Malformed,
     /// a signature does not verify under its issuer's key
     Signature,
@@ -139,10 +161,7 @@ pub fn verify_chain(root: &PublicKey, chain: &[Certificate], now_ms: u64) -> Res
     if chain.is_empty() || chain.len() > MAX_CHAIN {
         return Err(ChainError::Length);
     }
-    let bodies: Vec<CertificateBody> = chain
-        .iter()
-        .map(|c| CertificateBody::decode(c.body.as_slice()).map_err(|_| ChainError::Malformed))
-        .collect::<Result<_, _>>()?;
+    let bodies: Vec<CertificateBody> = chain.iter().map(|c| decode_body(&c.body)).collect::<Result<_, _>>()?;
 
     for (i, (cert, body)) in chain.iter().zip(&bodies).enumerate() {
         let subject = key32(&body.subject)?;
@@ -217,6 +236,22 @@ fn verify(key: &PublicKey, label: &[u8], message: &[u8], signature: &[u8]) -> Re
     signed.extend_from_slice(label);
     signed.extend_from_slice(message);
     key.verify_strict(&signed, &signature).map_err(|_| BadSignature)
+}
+
+/// Decode a certificate body, refusing anything over its bounds before any of it is compared or verified.
+fn decode_body(bytes: &[u8]) -> Result<CertificateBody, ChainError> {
+    if bytes.len() > MAX_CERT_BYTES {
+        return Err(ChainError::Malformed);
+    }
+    let body = CertificateBody::decode(bytes).map_err(|_| ChainError::Malformed)?;
+    let name_ok = |s: &String| {
+        (1..=MAX_SCOPE_BYTES).contains(&s.len())
+            && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-'))
+    };
+    if body.scopes.len() > MAX_SCOPES || !body.scopes.iter().all(name_ok) || body.label.len() > MAX_LABEL_BYTES {
+        return Err(ChainError::Malformed);
+    }
+    Ok(body)
 }
 
 fn key32(bytes: &[u8]) -> Result<[u8; 32], ChainError> {
