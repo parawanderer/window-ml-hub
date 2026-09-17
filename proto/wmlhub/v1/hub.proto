@@ -67,6 +67,11 @@ message Limits {
   // envelopes retained per stream, by kind; 0 means the kind is not retained
   uint32 ring_session_events = 3;
   uint32 ring_telemetry = 4;
+  // Work the account may cause, shared by all its connections: every message at its size plus 64 bytes a frame, and
+  // 64 bytes for each frame the hub queues on its behalf. Past the rate the hub stops reading until the debt is repaid,
+  // so a client that sends faster simply goes slower. A client pacing itself below this is never delayed.
+  uint64 account_bytes_per_second = 5;
+  uint64 account_burst_bytes = 6;
 }
 
 // How the hub treats an envelope: whether it is retained, and what happens when a subscriber falls behind.
@@ -186,6 +191,10 @@ message Error {
     CODE_LIMIT = 5;
     // a subscriber fell behind on KIND_SESSION_EVENTS; the connection closes after this, and it resubscribes
     CODE_SLOW_CONSUMER = 6;
+    // The account is over its work rate (Welcome.limits.account_bytes_per_second): the hub is reading this connection
+    // more slowly until the debt is repaid. Nothing was dropped and the connection stays open. Sent for a wait of 100 ms or
+    // more, at most once per connection every 10 seconds.
+    CODE_THROTTLED = 7;
   }
   Code code = 1;
   // the `ref` of the envelope this is about, when it is about one

@@ -276,3 +276,50 @@ async fn concurrent_new_accounts_never_exceed_the_limit() {
     }
     assert_eq!(admitted, 5);
 }
+
+#[tokio::test]
+async fn an_account_over_its_work_rate_is_slowed_loses_nothing_and_slows_no_other_account() {
+    const RATE: usize = 20_000;
+    let mut config = wmlhub::Config::default();
+    config.limits.account_bytes_per_second = RATE;
+    config.limits.account_burst_bytes = RATE;
+    let url = start(config).await;
+
+    let mut slow_rt = join(&url, "slow", "rt", Role::Runtime).await;
+    let mut slow_phone = join(&url, "slow", "phone", Role::Client).await;
+    send(&mut slow_phone, &[subscribe("rt", "s")]).await;
+    expect(&mut slow_phone, |b| matches!(b, Body::Backfilled(_))).await;
+    let mut fast_rt = join(&url, "fast", "rt", Role::Runtime).await;
+    let mut fast_phone = join(&url, "fast", "phone", Role::Client).await;
+    send(&mut fast_phone, &[subscribe("rt", "s")]).await;
+    expect(&mut fast_phone, |b| matches!(b, Body::Backfilled(_))).await;
+
+    // 5 x 8 KB at 20 KB/s: at least two seconds of work, all of it sent at once
+    let started = tokio::time::Instant::now();
+    for i in 0..5u8 {
+        send(&mut slow_rt, &[envelope(To::Channel(b"s".to_vec()), Kind::SessionEvents, &[i; 8_000], 0)]).await;
+    }
+    // meanwhile another account's small publish goes straight through
+    send(&mut fast_rt, &[envelope(To::Channel(b"s".to_vec()), Kind::SessionEvents, b"hi", 0)]).await;
+    expect(&mut fast_phone, |b| matches!(b, Body::Envelope(_))).await;
+    let fast = started.elapsed();
+
+    let mut seen = Vec::new();
+    while seen.len() < 5 {
+        let Body::Envelope(e) = expect(&mut slow_phone, |b| matches!(b, Body::Envelope(_))).await else {
+            unreachable!()
+        };
+        seen.push(e.payload[0]);
+    }
+    let slow = started.elapsed();
+    assert_eq!(seen, [0, 1, 2, 3, 4], "every envelope, in order");
+    let mut told = false;
+    while let Ok(Some(frames)) = tokio::time::timeout(Duration::from_millis(200), recv(&mut slow_rt)).await {
+        told |= frames.iter().any(|f| matches!(&f.body, Some(Body::Error(e)) if e.code() == Code::Throttled));
+    }
+    assert!(told, "the throttled connection was told");
+    assert!(slow >= Duration::from_millis(1_800), "40 KB at 20 KB/s took only {slow:?}");
+    // and no longer: a budget that never refills (two clocks mixed up, say) makes every message wait longer than the last
+    assert!(slow < Duration::from_millis(3_500), "40 KB at 20 KB/s took {slow:?}");
+    assert!(fast < Duration::from_millis(500), "the other account waited {fast:?}");
+}

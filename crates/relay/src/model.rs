@@ -87,6 +87,13 @@ pub enum Op {
         slot: u8,
         what: u8,
     },
+    /// A websocket message of `bytes` arrives `after_ms` after the last one; the server charges it and, if told to
+    /// wait, sleeps that long.
+    Charge {
+        slot: u8,
+        bytes: u16,
+        after_ms: u8,
+    },
 }
 
 /// The tiny limits every run uses.
@@ -106,6 +113,8 @@ pub fn limits() -> Limits {
         queue_session_events: 6,
         queue_telemetry: 3,
         queue_bytes: 2048,
+        account_bytes_per_second: 2_000,
+        account_burst_bytes: 3_000,
     }
 }
 
@@ -131,6 +140,8 @@ pub struct Model {
     counter: u32,
     /// connections sent an `Action::Wake` and not drained to empty since: what a server waiting on wakes would know
     woken: HashSet<ConnId>,
+    /// the server's monotonic clock
+    now_ms: u64,
 }
 
 fn principal_bytes(p: u8) -> Vec<u8> {
@@ -152,6 +163,7 @@ impl Model {
             epochs: Vec::new(),
             counter: 0,
             woken: HashSet::new(),
+            now_ms: 0,
         }
     }
 
@@ -295,6 +307,31 @@ impl Model {
                 self.judge_deliveries(s, &frames)?;
                 Vec::new()
             }
+            Op::Charge { slot, bytes, after_ms } => {
+                let Some(s) = self.slot(slot) else { return self.check() };
+                self.now_ms += u64::from(after_ms);
+                let (wait, actions) = self.hub.charge(s.conn, usize::from(bytes), self.now_ms);
+                self.judge_actions(&actions)?;
+                let account = self.hub.conn_account.get(&s.conn).cloned();
+                let acct = account.as_ref().and_then(|a| self.hub.accounts.get(a));
+                let Some(acct) = acct else { return self.check() };
+                // The server sleeps `wait`: by then the debt, this message included, must be repaid.
+                let (rate, burst) = (self.limits.account_bytes_per_second, self.limits.account_burst_bytes);
+                let mut after = acct.rate.clone();
+                after.refill(self.now_ms + wait, rate, burst);
+                if after.tokens() < 0 {
+                    return Err(format!("waited {wait} ms and the account is still {} bytes in debt", -after.tokens()));
+                }
+                if wait > 0 {
+                    let mut early = acct.rate.clone();
+                    early.refill(self.now_ms + wait - 1, rate, burst);
+                    if early.tokens() >= 0 {
+                        return Err(format!("told to wait {wait} ms when {} would have done", wait - 1));
+                    }
+                }
+                self.now_ms += wait;
+                Vec::new()
+            }
             Op::Misbehave { slot, what } => {
                 let Some(s) = self.slot(slot) else { return self.check() };
                 let body = match what % 6 {
@@ -392,6 +429,11 @@ impl Model {
         let l = &self.limits;
         if self.hub.accounts.len() > l.max_accounts {
             return Err(format!("{} accounts over the limit", self.hub.accounts.len()));
+        }
+        for acct in self.hub.accounts.values() {
+            if acct.rate.tokens() > self.limits.account_burst_bytes as i64 {
+                return Err(format!("an account holds {} bytes of work, over its burst", acct.rate.tokens()));
+            }
         }
         // No lost wake-ups: anything queued has a wake outstanding, or a server waiting on wakes never sends it.
         for acct in self.hub.accounts.values() {

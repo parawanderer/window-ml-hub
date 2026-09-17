@@ -37,6 +37,13 @@ pub struct Limits {
     pub queue_telemetry: usize,
     /// Bytes queued for one connection, of every kind, before it is disconnected as a slow consumer.
     pub queue_bytes: usize,
+
+    /// Work one account may cause per second, in bytes: every message it sends at its size plus `FRAME_COST_BYTES` a
+    /// frame, and `FRAME_COST_BYTES` for every frame queued on its behalf. Past it, the server stops reading the
+    /// account's connections until the debt is repaid (rate.rs).
+    pub account_bytes_per_second: usize,
+    /// How much of that work may come at once.
+    pub account_burst_bytes: usize,
 }
 
 impl Default for Limits {
@@ -56,6 +63,8 @@ impl Default for Limits {
             queue_session_events: 1024,
             queue_telemetry: 128,
             queue_bytes: 16 << 20,
+            account_bytes_per_second: 8 << 20,
+            account_burst_bytes: 32 << 20,
         }
     }
 }
@@ -68,6 +77,8 @@ impl Limits {
             max_payload_bytes: clamp_u32(self.max_payload_bytes),
             ring_session_events: clamp_u32(self.ring_session_events),
             ring_telemetry: clamp_u32(self.ring_telemetry),
+            account_bytes_per_second: self.account_bytes_per_second as u64,
+            account_burst_bytes: self.account_burst_bytes as u64,
         }
     }
 }

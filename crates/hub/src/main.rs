@@ -57,6 +57,13 @@ struct Serve {
     /// Open registration: new accounts in total per hour.
     #[arg(long, env = "WMLHUB_OPEN_TOTAL", default_value_t = OpenLimits::default().total)]
     open_total: u32,
+    /// Work one account may cause per second, in bytes (messages at their size plus 64 bytes a frame, and 64 bytes per
+    /// frame delivered on its behalf). Past it the hub reads that account's connections more slowly; nothing is dropped.
+    #[arg(long, env = "WMLHUB_ACCOUNT_BYTES_PER_SECOND", default_value_t = wmlhub_relay::Limits::default().account_bytes_per_second)]
+    account_bytes_per_second: usize,
+    /// How much of that work may arrive at once.
+    #[arg(long, env = "WMLHUB_ACCOUNT_BURST_BYTES", default_value_t = wmlhub_relay::Limits::default().account_burst_bytes)]
+    account_burst_bytes: usize,
     /// Independent relay shards, each with its own lock. 0 picks four per core.
     #[arg(long, env = "WMLHUB_SHARDS", default_value_t = 0)]
     shards: usize,
@@ -173,7 +180,9 @@ async fn serve(args: Serve) -> ExitCode {
         Err(e) => return fail(&format!("cannot listen on {}: {e}", args.listen)),
     };
     let seed = now_ms() ^ u64::from(std::process::id()).rotate_left(32);
-    let config = wmlhub::Config { auth, shards: args.shards, ..wmlhub::Config::default() };
+    let mut config = wmlhub::Config { auth, shards: args.shards, ..wmlhub::Config::default() };
+    config.limits.account_bytes_per_second = args.account_bytes_per_second;
+    config.limits.account_burst_bytes = args.account_burst_bytes;
     tokio::select! {
         result = wmlhub::serve(listener, config, seed) => {
             if let Err(e) = result {

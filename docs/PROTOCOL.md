@@ -103,8 +103,14 @@ contract's `epoch`/`cursor`, inside the ciphertext, are the runtime's own and su
 
 ## Limits and failure
 
-- Every limit is per account and announced in `Welcome`. Exceeding one is `Error{LIMIT}` and a close, never a silent
-  throttle, so a misbehaving client finds out.
+- Every limit is per account and announced in `Welcome`. Exceeding one is `Error{LIMIT}` and a close, so a
+  misbehaving client finds out.
+- **The one exception is work over time.** An account may cause `account_bytes_per_second` of work, with
+  `account_burst_bytes` at once, shared by all its connections. Every message costs its size plus 64 bytes a frame, and
+  every frame the hub queues on the account's behalf (fan-out, backfill, answers) costs 64 bytes more. Past the rate,
+  the hub reads the account's connections more slowly until the debt is repaid: sends back up in TCP, nothing is
+  dropped, nothing is closed. A connection made to wait 100 ms or more is told with `Error{THROTTLED}`, at most once
+  every 10 seconds, so a client finds out without being disconnected for a burst. A new account starts with nothing banked.
 - **A peer answers every `Ping` with a `Pong`**, and a connection that sends nothing at all for 60 seconds is closed
   with `Error{LIMIT}`. The hub pings every 20 seconds.
 - `Ping`/`Pong` keep a quiet connection alive. The MV3 finding (`docs/findings/mv3-websocket-lifetime.md`) is that
