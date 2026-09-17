@@ -8,21 +8,21 @@ use wmlhub_proto::v1::Role;
 #[path = "rfc9180_vector.rs"]
 mod rfc9180_vector;
 
-const NOW: u64 = 1_800_000_000_000;
+pub(crate) const NOW: u64 = 1_800_000_000_000;
 
 fn hex(s: &str) -> Vec<u8> {
     (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
 }
 
 /// A principal of an account: its identity, the seed of its agreement key, and its chain.
-struct Principal {
-    identity: Identity,
+pub(crate) struct Principal {
+    pub(crate) identity: Identity,
     agreement_seed: [u8; 32],
-    chain: Vec<Certificate>,
+    pub(crate) chain: Vec<Certificate>,
 }
 
 impl Principal {
-    fn new(root: &Identity, seed: u8, role: Role, scopes: &[&str]) -> Self {
+    pub(crate) fn new(root: &Identity, seed: u8, role: Role, scopes: &[&str]) -> Self {
         let identity = Identity::from_seed([seed; 32]);
         let agreement_seed = [seed.wrapping_add(100); 32];
         let spec = CertSpec {
@@ -39,43 +39,43 @@ impl Principal {
         Self { identity, agreement_seed, chain }
     }
 
-    fn id(&self) -> PrincipalId {
+    pub(crate) fn id(&self) -> PrincipalId {
         principal_id(&self.identity.public())
     }
 
-    fn sender(&self) -> Sender<'_> {
+    pub(crate) fn sender(&self) -> Sender<'_> {
         Sender { identity: &self.identity, chain: &self.chain }
     }
 
-    fn recipient(&self) -> Recipient {
+    pub(crate) fn recipient(&self) -> Recipient {
         Recipient { principal: self.id(), agreement_key: AgreementKey::from_seed(&self.agreement_seed).public() }
     }
 
-    fn receiver(&self, root: &Identity) -> Receiver {
+    pub(crate) fn receiver(&self, root: &Identity) -> Receiver {
         Receiver::new(&self.identity.public(), AgreementKey::from_seed(&self.agreement_seed), root.public())
     }
 }
 
 /// A root, a phone that may view and drive, and a runtime.
-struct Account {
-    root: Identity,
-    phone: Principal,
-    runtime: Principal,
+pub(crate) struct Account {
+    pub(crate) root: Identity,
+    pub(crate) phone: Principal,
+    pub(crate) runtime: Principal,
 }
 
 impl Account {
-    fn new(root_seed: u8) -> Self {
+    pub(crate) fn new(root_seed: u8) -> Self {
         let root = Identity::from_seed([root_seed; 32]);
         let phone = Principal::new(&root, root_seed.wrapping_add(1), Role::Client, &[scope::VIEW, scope::DRIVE]);
         let runtime = Principal::new(&root, root_seed.wrapping_add(2), Role::Runtime, &[]);
         Self { root, phone, runtime }
     }
 
-    fn runtime_receiver(&self) -> Receiver {
+    pub(crate) fn runtime_receiver(&self) -> Receiver {
         self.runtime.receiver(&self.root)
     }
 
-    fn phone_receiver(&self) -> Receiver {
+    pub(crate) fn phone_receiver(&self) -> Receiver {
         self.phone.receiver(&self.root)
     }
 }
@@ -86,7 +86,7 @@ fn command(a: &Account, scope: &str) -> (Vec<u8>, [u8; NONCE_BYTES]) {
 
 /// Seal an arbitrary `SignedCommand` between `from` and `to`, for defects `seal` cannot make.
 fn seal_raw(from: &PrincipalId, to: &Recipient, signed: &SignedCommand) -> Vec<u8> {
-    hpke_seal(from, to, &signed.encode_to_vec()).unwrap()
+    hpke_seal(SEAL_INFO_LABEL, from, to, &signed.encode_to_vec()).unwrap()
 }
 
 fn body(a: &Account, edit: impl FnOnce(&mut CommandBody)) -> SignedCommand {

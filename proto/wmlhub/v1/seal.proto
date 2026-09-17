@@ -45,3 +45,49 @@ message CommandBody {
   // on a result: the nonce of the command it answers. Empty on a command.
   bytes answers = 7;
 }
+
+// ------------------------------ published streams ------------------------------
+// docs/design/end-to-end-crypto.md §Published streams. A `StreamFrame` is the payload of a KIND_SESSION_EVENTS or
+// KIND_TELEMETRY envelope: a batch of events under the stream key, signed by the publisher so a device holding the key
+// still cannot forge the publisher's events to the other devices.
+
+message StreamFrame {
+  // which stream key opens this: SHA-256("wmlhub/streamkey-id/v1" || 0x00 || key), first 8 bytes
+  bytes key_id = 1;
+  // the publisher's own count for this channel, from 1, across key rotations; what a client orders by, since the hub's
+  // `seq` is only a routing aid
+  uint64 counter = 2;
+  // 12 bytes, fresh per frame
+  bytes nonce = 3;
+  // AES-256-GCM of the batch, with the header below as associated data
+  bytes ciphertext = 4;
+  // Ed25519 by the publisher over "wmlhub/stream/v1" || 0x00 || header || ciphertext, where header is
+  // publisher (32) || channel length (2, big endian) || channel || key_id (8) || counter (8, big endian) || nonce (12).
+  // The header is what binds a frame to its channel, publisher, key and place in the stream: moved, renumbered or
+  // spliced, it stops verifying.
+  bytes signature = 5;
+}
+
+// A stream key handed to one device, sealed as a command is but under its own labels, so neither can be opened as the
+// other. The publisher wraps it, so the chain here is the publisher's own: it is also how a subscriber learns the key
+// that signs the stream's frames.
+message SignedGrant {
+  bytes body = 1;
+  // Ed25519 by the publisher over "wmlhub/grant/v1" || 0x00 || body
+  bytes signature = 2;
+  repeated Certificate chain = 3;
+}
+
+message GrantBody {
+  bytes from = 1;
+  bytes to = 2;
+  bytes nonce = 3;
+  uint64 time_ms = 4;
+  // the stream this key is for
+  bytes channel = 5;
+  bytes key_id = 6;
+  // 32 bytes of AES-256-GCM key
+  bytes key = 7;
+  // the first counter this key covers; frames before it need the previous key
+  uint64 from_counter = 8;
+}

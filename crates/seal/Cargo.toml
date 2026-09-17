@@ -9,8 +9,10 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+aes-gcm = { version = "0.11", default-features = false, features = ["aes", "alloc"] }
 getrandom = "0.4"
 hpke = { version = "0.14.1", default-features = false, features = ["alloc", "x25519", "aes", "getrandom"] }
+sha2 = "0.11"
 wmlhub-keys = { path = "../keys" }
 wmlhub-proto = { path = "../proto" }
 
