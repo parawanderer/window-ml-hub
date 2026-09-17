@@ -61,9 +61,10 @@ jobs:
       - name: Fuzz every target
         working-directory: fuzz
         run: |
+          # The prebuilt cargo-fuzz is a musl binary and defaults to a musl target, where the sanitizers cannot link.
           for target in $(cargo +nightly fuzz list); do
             echo "::group::$target"
-            cargo +nightly fuzz run "$target" -- -max_total_time=30
+            cargo +nightly fuzz run --target x86_64-unknown-linux-gnu "$target" -- -max_total_time=30
             echo "::endgroup::"
           done
       - name: Upload crashes
