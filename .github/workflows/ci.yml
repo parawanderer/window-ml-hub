@@ -37,6 +37,14 @@ jobs:
       - name: Docs
         run: cargo doc --workspace --no-deps --locked
 
+  # Vendored schemas are byte for byte the upstream file they pin (docs/SCHEMAS.md).
+  schemas:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Vendored schemas match their pins
+        run: tools/check-pins.sh
+
   # The minimum supported Rust version in Cargo.toml is a claim; this is what checks it.
   msrv:
     runs-on: ubuntu-latest

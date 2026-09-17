@@ -1,0 +1,8 @@
+{
+  "_": "Where this schema comes from, as a checkable fact. The definition lives beside its encoder in the ollama fork; this is a vendored copy, pinned by git blob id so CI can prove offline that it is byte for byte the file at that commit. Never edit events.proto: replace it wholesale from the fork, update commit and blob, and CI checks the rest. See docs/SCHEMAS.md.",
+  "repo": "parawanderer/ollama",
+  "branch": "slop",
+  "path": "api/events.proto",
+  "commit": "aa1536a0c79d1a855715c18b7c68231a76394992",
+  "blob": "7a842b723cf8117d16b75d9a7a74c11b88b70d77"
+}
