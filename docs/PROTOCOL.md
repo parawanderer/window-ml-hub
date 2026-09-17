@@ -97,6 +97,8 @@ contract's `epoch`/`cursor`, inside the ciphertext, are the runtime's own and su
 
 - Every limit is per account and announced in `Welcome`. Exceeding one is `Error{LIMIT}` and a close, never a silent
   throttle, so a misbehaving client finds out.
+- **A peer answers every `Ping` with a `Pong`**, and a connection that sends nothing at all for 60 seconds is closed
+  with `Error{LIMIT}`. The hub pings every 20 seconds.
 - `Ping`/`Pong` keep a quiet connection alive. The MV3 finding (`docs/findings/mv3-websocket-lifetime.md`) is that
   traffic either way at least every 20 to 25 seconds keeps the extension's service worker running, so the hub pings a
   runtime at least that often.

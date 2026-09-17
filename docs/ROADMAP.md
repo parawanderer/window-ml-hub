@@ -9,7 +9,7 @@ In order. Each step lands as its own PR with CI green. Design questions are answ
    ([finding](findings/mv3-websocket-lifetime.md)).
 3. **Framing.** Done: `crates/frame`.
 4. **The envelope and the relay, without crypto.** Protocol drafted: [PROTOCOL.md](PROTOCOL.md). Routing core:
-   `crates/relay`. Next: the websocket server. `proto/` for the envelope and control messages; a websocket
+   `crates/relay`. Websocket server: `crates/hub` (development mode only). `proto/` for the envelope and control messages; a websocket
    server (tokio) with per-account routing, bounded rings per source, backpressure by kind (telemetry coalesced and
    dropped with a marker, session events never dropped: a subscriber that falls behind is disconnected and resyncs),
    and per-account limits. Payloads are opaque bytes from the first commit, so nothing has to be taken out later.
