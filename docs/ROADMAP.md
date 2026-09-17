@@ -20,7 +20,8 @@ In order. Each step lands as its own PR with CI green. Design questions are answ
 6. **End-to-end encryption.** Decided: HPKE-style boxes on WebCrypto
    ([finding](findings/webcrypto-in-mv3-worker.md)), stream keys wrapped per device, one signature per published
    envelope, signed commands with nonces and a clock window. Lives in the clients: a Rust client library here, the
-   extension's connector in window-ml.
+   extension's connector in window-ml. Commands and results: `crates/seal`. Next: published streams (stream keys,
+   wrapping, signed batches), then a Rust client with an end-to-end test through the hub and shared vectors.
 7. **The box connector mode.** Schema vendored ([SCHEMAS.md](SCHEMAS.md)); relay rules in
    [design/box-connector.md](design/box-connector.md).
 8. **The extension's connector** in window-ml's background worker. Last, and coordinated with the chat page work,

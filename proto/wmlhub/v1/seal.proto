@@ -1,0 +1,47 @@
+syntax = "proto3";
+
+// Commands and their results, end to end (docs/design/end-to-end-crypto.md §Commands and results). These are the bytes
+// inside `Envelope.payload` for KIND_COMMAND and KIND_COMMAND_RESULT. The hub never decodes them.
+//
+// Outside in: `Sealed` is an HPKE ciphertext (RFC 9180 base mode, DHKEM(X25519, HKDF-SHA256), HKDF-SHA256,
+// AES-256-GCM) to the recipient's agreement key, with info "wmlhub/seal/v1" || 0x00 || from || to (principal ids, 32
+// bytes each). Opened, it is a `SignedCommand`: the sender's certificate chain and a signature over the exact
+// `CommandBody` bytes. Signing inside the seal means the hub cannot tell whose signature it is carrying; binding both
+// ids into the info means a ciphertext opens only between the pair it was sealed for.
+package wmlhub.v1;
+
+import "wmlhub/v1/identity.proto";
+
+message Sealed {
+  // the HPKE encapsulated key: an ephemeral X25519 public key, 32 bytes
+  bytes enc = 1;
+  // HPKE ciphertext of an encoded SignedCommand, AEAD tag included
+  bytes ciphertext = 2;
+}
+
+message SignedCommand {
+  // an encoded CommandBody, verified exactly as transmitted, never re-encoded
+  bytes body = 1;
+  // Ed25519 by the sender's leaf identity key over "wmlhub/command/v1" || 0x00 || body
+  bytes signature = 2;
+  // the sender's certificate chain, leaf first, so the recipient can check it reaches the account root and grants
+  // `scope`
+  repeated Certificate chain = 3;
+}
+
+message CommandBody {
+  // sender and recipient principal ids (SHA-256 of their identity keys)
+  bytes from = 1;
+  bytes to = 2;
+  // The scope the command needs (window-ml `COMMAND_SCOPE`), checked against the sender's leaf certificate. Empty on a
+  // result.
+  string scope = 3;
+  // 16 random bytes, never reused by a sender; the recipient refuses one it has seen within the clock window
+  bytes nonce = 4;
+  // the sender's wall clock, epoch milliseconds; refused outside the recipient's window
+  uint64 time_ms = 5;
+  // the command or its result, as the session contract encodes it; opaque here
+  bytes body = 6;
+  // on a result: the nonce of the command it answers. Empty on a command.
+  bytes answers = 7;
+}

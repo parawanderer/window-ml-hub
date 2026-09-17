@@ -1,0 +1,18 @@
+[package]
+name = "wmlhub-seal"
+version = "0.1.0"
+description = "Sealed, signed commands between principals of the window.ml hub (end-to-end, the hub never opens them)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+getrandom = "0.4"
+hpke = { version = "0.14.1", default-features = false, features = ["alloc", "x25519", "aes", "getrandom"] }
+wmlhub-keys = { path = "../keys" }
+wmlhub-proto = { path = "../proto" }
+
+[lints]
+workspace = true

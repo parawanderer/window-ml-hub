@@ -23,6 +23,7 @@ in [AGENTS.md](../AGENTS.md); this is how it is done.
 | `frames` | decoding one websocket message never panics; what decodes re-encodes and decodes to the same frames |
 | `frame_reader` | however the same bytes are split into reads, the frames, the error and the pending count match a single read |
 | `chain` | certificate verification never panics on arbitrary bytes; a valid one- or two-certificate chain with any one bit flipped never verifies |
+| `seal` | opening a sealed command never panics, whatever arrives and whoever the hub claims sent it; an honest one with any one bit flipped, or delivered as from any other sender, never opens |
 
 ## Running
 

@@ -1,6 +1,7 @@
 # Proposal: keys, accounts and end-to-end encryption
 
-**Status: decided 2026-09-17; being built** (identities and certificates: `crates/keys`). Roadmap steps 5 and 6. Built on the finding
+**Status: decided 2026-09-17; being built** (identities and certificates: `crates/keys`; commands and results:
+`crates/seal`). Roadmap steps 5 and 6. Built on the finding
 [`webcrypto-in-mv3-worker.md`](../findings/webcrypto-in-mv3-worker.md). The requirements are window-ml
 `docs/spec/RUNTIME_HUB.md` §Security: the hub relays ciphertext and routing metadata only, cannot read or forge a
 command, every command is signed with a nonce and a clock window, keys never reach the page's main world.
@@ -69,6 +70,26 @@ A command is `{ to, scope, body, nonce, time }` (spec §Security 4), then:
    nonce is new, and `time` is within the window (proposed: 60 s, nonces kept for the window).
 
 A command result is sealed back the same way and names the command's nonce.
+
+As built (`crates/seal`, wire format `proto/wmlhub/v1/seal.proto`):
+
+- **HPKE base mode**, suite (0x0020, 0x0001, 0x0002), checked against the RFC 9180 test vector for that suite. `info`
+  is `"wmlhub/seal/v1" || 0x00 || from || to`, both 32-byte principal ids; `aad` is empty. The hub-stamped
+  `Envelope.sender` is the `from` the recipient uses, so a hub that claims another sender gets a ciphertext that does
+  not open, and one delivered to the wrong principal does not decrypt either.
+- **Signed inside the seal**: `SignedCommand { body, signature, chain }`, the signature over
+  `"wmlhub/command/v1" || 0x00 || body`, so the hub cannot see whose signature it carries. The chain rides along
+  (under 1 KB) so a recipient needs no directory to check scope.
+- **Checked in order of cost**: size (1 MiB), decrypt, chain to the account root, the chain's leaf is the stamped
+  sender, signature, `from` and `to`, clock (60 s either way), scope (a command) or `answers` (a result), and last the
+  nonce, so only an authenticated command inside its window can occupy the replay window.
+- **Replay window**: 16-byte nonces per sender, kept until two windows plus a millisecond after arrival, which is the
+  last moment a command dated a window ahead could still pass the clock. It holds 65,536 and refuses when full
+  rather than forgetting a live nonce.
+- **Cost** (M4, release, one core, three rounds of 2,000; `seal_and_open_costs`): a 64 B command seals to 483 B (419 B
+  of chain, signature, HPKE key and tag) in 57 us and opens in 80 us; 4 KB: 63 us and 82-84 us; 64 KB: 155-162 us and
+  143-152 us. Opening is one X25519 decapsulation and two Ed25519 verifications (the certificate and the command), so
+  a runtime spends well under a millisecond per command however large a phone's queue of them.
 
 ### Published streams
 

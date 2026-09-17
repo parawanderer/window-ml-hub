@@ -59,6 +59,17 @@ fn a_tampered_body_is_refused() {
 }
 
 #[test]
+fn command_and_hello_signatures_cannot_stand_in_for_each_other() {
+    let phone = id(2);
+    let message = b"the same bytes, signed for two purposes";
+    let as_hello = sign_hello(&phone, message);
+    let as_command = sign_command(&phone, message);
+    assert!(verify_command(&phone.public(), message, &as_command).is_ok());
+    assert!(verify_command(&phone.public(), message, &as_hello).is_err());
+    assert!(verify_hello(&phone.public(), message, &as_command).is_err());
+}
+
+#[test]
 fn a_certificate_signature_cannot_be_used_as_a_hello_signature() {
     let (root, phone) = (id(1), id(2));
     let cert = issue(&root, &spec(&phone));

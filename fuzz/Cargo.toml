@@ -17,6 +17,7 @@ wmlhub-frame = { path = "../crates/frame" }
 wmlhub-keys = { path = "../crates/keys" }
 wmlhub-proto = { path = "../crates/proto" }
 wmlhub-relay = { path = "../crates/relay", features = ["testing"] }
+wmlhub-seal = { path = "../crates/seal" }
 
 [workspace]
 members = ["."]
@@ -45,6 +46,13 @@ bench = false
 [[bin]]
 name = "chain"
 path = "fuzz_targets/chain.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "seal"
+path = "fuzz_targets/seal.rs"
 test = false
 doc = false
 bench = false

@@ -41,6 +41,7 @@ pub mod scope {
 
 const CERT_LABEL: &[u8] = b"wmlhub/cert/v1\0";
 const HELLO_LABEL: &[u8] = b"wmlhub/hello/v1\0";
+const COMMAND_LABEL: &[u8] = b"wmlhub/command/v1\0";
 
 /// An Ed25519 identity key held in memory: for clients, tools and tests. (The extension keeps its keys as
 /// non-extractable WebCrypto keys instead; this type is never how a browser holds one.)
@@ -213,6 +214,16 @@ pub fn hello_transcript(hub: &str, nonce: &[u8], principal: &[u8], role: Role, a
     t.extend_from_slice(&(role as i32).to_be_bytes());
     t.extend_from_slice(account);
     t
+}
+
+/// Sign an encoded `CommandBody` (a command or a result) with the sender's leaf identity.
+pub fn sign_command(leaf: &Identity, body: &[u8]) -> Vec<u8> {
+    leaf.sign(COMMAND_LABEL, body)
+}
+
+/// Verify a command or result signature made by `leaf_key`.
+pub fn verify_command(leaf_key: &PublicKey, body: &[u8], signature: &[u8]) -> Result<(), BadSignature> {
+    verify(leaf_key, COMMAND_LABEL, body, signature)
 }
 
 /// Sign a hello transcript with the leaf identity.
