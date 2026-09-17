@@ -61,6 +61,7 @@ Which repository owns which wire schema, and how the others pin it: [`docs/SCHEM
 | `crates/proto` | the wire types generated from `proto/wmlhub/v1/hub.proto` (no `protoc` needed) |
 | `crates/hub` | the `wmlhub` binary: the websocket server around the relay |
 | `crates/keys` | identities, certificate chains and the signed hello; the hub uses only the verifying half |
+| `crates/seal` | sealed, signed commands and results between principals (HPKE, RFC 9180); the hub never uses it |
 | `crates/relay` | the routing core with no IO: accounts, presence, streams and rings, backpressure, limits |
 | `proto/` | the hub's wire schema (rules in [`docs/PROTOCOL.md`](docs/PROTOCOL.md)); `proto/vendor/` holds pinned copies of other repos' schemas |
 | `crates/loadgen` | `wmlhub-loadgen`: throughput, latency percentiles, CPU per delivery, memory per connection ([docs/perf](docs/perf/README.md)) |

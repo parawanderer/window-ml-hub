@@ -3,7 +3,7 @@
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../proto");
-    let files = ["wmlhub/v1/hub.proto", "wmlhub/v1/identity.proto"];
+    let files = ["wmlhub/v1/hub.proto", "wmlhub/v1/identity.proto", "wmlhub/v1/seal.proto"];
     for file in files {
         println!("cargo:rerun-if-changed={root}/{file}");
     }
