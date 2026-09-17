@@ -31,6 +31,10 @@ const KEY_ID_BYTES: usize = 8;
 
 const GRANT_INFO_LABEL: &[u8] = b"wmlhub/keygrant/v1\0";
 const KEY_ID_LABEL: &[u8] = b"wmlhub/streamkey-id/v1\0";
+const CHANNEL_LABEL: &[u8] = b"wmlhub/channel/v1\0";
+
+/// Bytes of a channel name.
+pub const CHANNEL_BYTES: usize = 16;
 
 /// A stream's symmetric key. The publisher chooses it, rotates it, and wraps it to every device allowed to read.
 #[derive(Clone)]
@@ -169,6 +173,39 @@ pub fn open_grant(receiver: &mut Receiver, sender: &[u8], sealed: &[u8], now_ms:
         key,
         from_counter: body.from_counter,
     })
+}
+
+/// An account-wide key for naming channels. Kept with the account's other secrets and never sent to the hub.
+#[derive(Clone)]
+pub struct ChannelKey([u8; 32]);
+
+impl ChannelKey {
+    pub fn generate() -> Result<Self, getrandom::Error> {
+        let mut key = [0u8; 32];
+        getrandom::fill(&mut key)?;
+        Ok(Self(key))
+    }
+
+    pub fn from_bytes(key: [u8; 32]) -> Self {
+        Self(key)
+    }
+
+    /// The channel a stream of `what` (a session hash, a box id) travels on: HMAC-SHA256 under this account's channel
+    /// key, truncated to 16 bytes. The hub routes by this and learns nothing from it: it cannot tell which session a
+    /// channel belongs to, or that two accounts are watching the same box (docs/PROTOCOL.md §What the hub can see).
+    /// `purpose` separates the streams of one subject, so a session's events and its keys are different channels.
+    pub fn channel(&self, purpose: &str, what: &[u8]) -> [u8; CHANNEL_BYTES] {
+        use hmac::{KeyInit, Mac};
+        let mut mac = hmac::Hmac::<Sha256>::new_from_slice(&self.0).expect("HMAC takes a key of any length");
+        mac.update(CHANNEL_LABEL);
+        mac.update(purpose.as_bytes());
+        mac.update(&[0]);
+        mac.update(what);
+        let tag = mac.finalize().into_bytes();
+        let mut channel = [0u8; CHANNEL_BYTES];
+        channel.copy_from_slice(&tag[..CHANNEL_BYTES]);
+        channel
+    }
 }
 
 /// Why a published frame was refused.
