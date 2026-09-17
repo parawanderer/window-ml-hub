@@ -396,3 +396,27 @@ fn resubscribing_with_envelopes_still_queued_delivers_each_seq_once_in_order() {
     let got: Vec<String> = out(&mut h, phone).into_iter().filter(|l| l.starts_with("env")).collect();
     assert_eq!(got, ["env from=rt seq=1 a", "env from=rt seq=2 b"]);
 }
+
+#[test]
+fn shards_hand_out_connection_ids_that_never_collide() {
+    let mut a = Hub::with_id_space(Limits::default(), 1, 0).unwrap();
+    let mut b = Hub::with_id_space(Limits::default(), 1, 1).unwrap();
+    let ida = a.connect(acct("x"), &hello("p", Role::Client), NOW).unwrap().0;
+    let idb = b.connect(acct("x"), &hello("p", Role::Client), NOW).unwrap().0;
+    assert_ne!(ida, idb);
+    assert_eq!(idb >> 48, 1);
+}
+
+#[test]
+fn account_count_follows_connections_and_streams() {
+    let mut h = hub();
+    assert!(!h.has_account(&acct("alice")));
+    let rt = join(&mut h, "alice", "rt", Role::Runtime);
+    assert!(h.has_account(&acct("alice")));
+    h.receive(rt, publish("s1", Kind::SessionEvents, b"kept"));
+    h.close(rt, None);
+    assert_eq!(h.account_count(), 1, "a retained ring keeps the account");
+    let c = join(&mut h, "bob", "p", Role::Client);
+    h.close(c, None);
+    assert_eq!(h.account_count(), 1, "an account with nothing left is forgotten");
+}
