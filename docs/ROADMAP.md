@@ -25,7 +25,8 @@ In order. Each step lands as its own PR with CI green. Design questions are answ
    a real hub: `crates/client`. Vectors for a second implementation: `vectors/seal-v1.json`
    ([VECTORS.md](VECTORS.md)); the extension's own vectors come back the other way when its connector is built.
 7. **The box connector mode.** Schema vendored ([SCHEMAS.md](SCHEMAS.md)); relay rules in
-   [design/box-connector.md](design/box-connector.md).
+   [design/box-connector.md](design/box-connector.md). Routing a frame by its tags, without decoding it:
+   `crates/box`. Next: the connector itself, reading `/api/events` and publishing on the two channels.
 8. **The extension's connector** in window-ml's background worker. Last, and coordinated with the chat page work,
    because both talk to `background.ts`.
 9. **Push for approvals** on a sleeping phone, carrying only "an approval is waiting".

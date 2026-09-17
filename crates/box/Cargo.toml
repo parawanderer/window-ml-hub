@@ -1,0 +1,29 @@
+[package]
+name = "wmlhub-box"
+version = "0.1.0"
+description = "The box connector's reading of an /api/events frame: which channel it belongs on, without decoding it"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+prost = { version = "0.14", optional = true }
+prost-types = { version = "0.14", optional = true }
+
+[features]
+# The generated box event types, for tests and fuzzing. The connector never decodes a frame.
+testing = ["dep:prost", "dep:prost-types"]
+
+[build-dependencies]
+prost-build = "0.14"
+protox = "0.9"
+
+[dev-dependencies]
+prost = "0.14"
+prost-types = "0.14"
+wmlhub-box = { path = ".", features = ["testing"] }
+
+[lints]
+workspace = true

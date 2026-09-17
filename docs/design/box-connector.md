@@ -1,6 +1,7 @@
 # Notes: the box connector
 
-**Status: notes for roadmap step 7, not built.** What the connector must do with a box's `/api/events` stream, from
+**Status: being built.** The classification (which channel a frame belongs on, read from its tags) is
+`crates/box`; the connector that reads the stream and publishes is next. What the connector must do with a box's `/api/events` stream, from
 the fork maintainer's answer (mlbox `reports/ui-api/events-schema-answer.md`, 2026-09-17) and the relay protocol. The
 schema is vendored at `proto/vendor/ollama/api/events.proto`; see [`../SCHEMAS.md`](../SCHEMAS.md).
 

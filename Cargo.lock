@@ -1334,6 +1334,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "wmlhub-box"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "prost-build",
+ "prost-types",
+ "protox",
+ "wmlhub-box",
+]
+
+[[package]]
 name = "wmlhub-client"
 version = "0.1.0"
 dependencies = [
