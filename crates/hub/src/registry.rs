@@ -4,8 +4,8 @@
 //! account and one file per outstanding invite, in a state directory. Every claim is an exclusive create
 //! (`create_new`, `O_CREAT|O_EXCL`), which is what makes an invite single-use even when two connections race for it,
 //! and lets `wmlhub invite create` run beside a live server without any locking. (Removing the invite file was the
-//! first design, and it is not a claim: two concurrent removals of one file both succeeded on macOS, registering up
-//! to three accounts with one invite in the race test.)
+//! first design, and it is not a claim: under the race test on macOS it let one invite register up to three
+//! accounts.)
 //!
 //! Invites are stored as the SHA-256 of the token, so reading the state directory does not reveal a usable invite.
 

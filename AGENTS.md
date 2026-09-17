@@ -29,8 +29,8 @@ Read before changing the relay: [`RUNTIME_HUB.md`](https://github.com/parawander
   account first. A global map keyed by runtime id alone is a bug even though ids are unique.
 - **No database.** Rings are a cache; the authority is on the runtimes and boxes. A lost node is a reconnect. The one
   thing on disk is operator state (registered account ids, outstanding invites) in a state directory, one file each.
-- **A claim on disk is an exclusive create** (`create_new`), never a remove or a rename: two concurrent removals of
-  one invite file both reported success on macOS, and one invite registered three accounts.
+- **A claim on disk is an exclusive create** (`create_new`), never a remove or a rename: claiming an invite by
+  removing its file let one invite register up to three accounts in a 16-thread race on macOS.
 - **Every hello verification failure looks the same on the wire.** Log the reason; do not send it.
 - **Runtimes and connectors dial out.** The hub never opens a connection to a runtime or a box.
 - **No `unsafe`** (forbidden at the workspace level).
