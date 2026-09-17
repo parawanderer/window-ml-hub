@@ -3,7 +3,7 @@
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 use wmlhub_box::schema::EventFrame;
-use wmlhub_box::{Route, read, route};
+use wmlhub_box::{Route, route};
 use wmlhub_proto::prost::Message;
 
 fuzz_target!(|data: &[u8]| {
