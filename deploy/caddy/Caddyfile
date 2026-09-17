@@ -1,0 +1,4 @@
+# Caddy obtains the certificate and proxies websockets as they are; nothing hub-specific is needed.
+{$WMLHUB_HUB_NAME} {
+	reverse_proxy hub:8787
+}

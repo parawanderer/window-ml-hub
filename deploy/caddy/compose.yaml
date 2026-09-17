@@ -1,0 +1,30 @@
+# A hub on the public internet with automatic HTTPS from Caddy (Let's Encrypt).
+# Needs: a DNS record for WMLHUB_HUB_NAME pointing at this machine, and ports 80 and 443 open.
+#   cp ../../.env.example .env   # set WMLHUB_HUB_NAME
+#   docker compose up -d
+#   docker compose exec hub wmlhub invite create
+services:
+  hub:
+    build: ../..
+    restart: unless-stopped
+    environment:
+      WMLHUB_HUB_NAME: ${WMLHUB_HUB_NAME:?set WMLHUB_HUB_NAME in .env}
+      WMLHUB_REGISTRATION: ${WMLHUB_REGISTRATION:-invite}
+    volumes:
+      - wmlhub-data:/data
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    environment:
+      WMLHUB_HUB_NAME: ${WMLHUB_HUB_NAME}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+
+volumes:
+  wmlhub-data:
+  caddy-data:

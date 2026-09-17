@@ -136,7 +136,8 @@ async fn main() -> ExitCode {
 }
 
 async fn serve(args: Serve) -> ExitCode {
-    tracing_subscriber::fmt().with_target(false).init();
+    // Colour only on a terminal: `docker logs` and log files otherwise fill with escape codes.
+    tracing_subscriber::fmt().with_target(false).with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout())).init();
 
     let auth = if args.dev {
         if !args.listen.ip().is_loopback() {
