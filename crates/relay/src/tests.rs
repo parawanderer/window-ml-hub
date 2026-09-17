@@ -436,3 +436,56 @@ fn account_count_follows_connections_and_streams() {
     h.close(c, None);
     assert_eq!(h.account_count(), 1, "an account with nothing left is forgotten");
 }
+
+/// What eviction costs an account at its limits, per publish, worst and mean (docs/perf/README.md §Eviction at the
+/// limits). Numbers, not assertions: `cargo test --release -p wmlhub-relay eviction_costs -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn eviction_costs() {
+    use std::time::{Duration, Instant};
+    fn timed(n: usize, mut f: impl FnMut(usize)) -> (Duration, Duration) {
+        let (mut worst, start) = (Duration::ZERO, Instant::now());
+        for i in 0..n {
+            let t = Instant::now();
+            f(i);
+            worst = worst.max(t.elapsed());
+        }
+        (worst, start.elapsed() / n as u32)
+    }
+    let l = Limits::default();
+    // Fill an account's every stream ring with `size`-byte payloads.
+    let filled = |size: usize| {
+        let mut h = hub();
+        let rt = join(&mut h, "a", "rt", Role::Runtime);
+        let p = vec![7u8; size];
+        for ch in 0..l.max_streams_per_account {
+            for _ in 0..l.ring_session_events {
+                h.receive(rt, publish(&format!("c{ch}"), Kind::SessionEvents, &p));
+            }
+        }
+        (h, rt)
+    };
+
+    let (mut h, rt) = filled(60);
+    let (worst, mean) = timed(l.max_streams_per_account, |i| {
+        h.receive(rt, publish(&format!("new{i}"), Kind::SessionEvents, b"x"));
+    });
+    eprintln!("new stream at the stream limit, victims hold full rings: worst {worst:?} mean {mean:?}");
+    let (worst, mean) = timed(20_000, |i| {
+        h.receive(rt, publish(&format!("again{i}"), Kind::SessionEvents, b"x"));
+    });
+    eprintln!("new stream at the stream limit, steady state: worst {worst:?} mean {mean:?}");
+
+    let (mut h, rt) = filled(120);
+    let (small, big) = (vec![7u8; 120], vec![1u8; l.max_payload_bytes]);
+    let (worst, mean) = timed(20_000, |i| {
+        h.receive(rt, publish(&format!("c{}", i % l.max_streams_per_account), Kind::SessionEvents, &small));
+    });
+    eprintln!("small publish at the byte budget: worst {worst:?} mean {mean:?}");
+    // the adversarial loop: refill one ring with small entries, then a maximal payload into it
+    let (worst, mean) = timed(50 * (l.ring_session_events + 1), |i| {
+        let body = if i % (l.ring_session_events + 1) == l.ring_session_events { &big } else { &small };
+        h.receive(rt, publish("c0", Kind::SessionEvents, body));
+    });
+    eprintln!("refill one ring then a maximal payload, repeated: worst {worst:?} mean {mean:?}");
+}
