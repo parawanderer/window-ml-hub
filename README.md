@@ -70,13 +70,15 @@ Which repository owns which wire schema, and how the others pin it: [`docs/SCHEM
 ## Running it
 
 ```bash
-cargo run -p wmlhub -- --dev                          # ws://127.0.0.1:8787
-cargo run -p wmlhub -- --dev --listen 127.0.0.1:9000
+cargo run -p wmlhub -- invite create                      # prints a single-use invite token
+cargo run -p wmlhub -- serve --hub-name hub.example.com    # ws://127.0.0.1:8787, invite-only registration
+cargo run -p wmlhub -- serve --dev                         # no authentication, loopback only, for development
 ```
 
-There is no authentication yet, so the server starts only with `--dev` and only on a loopback address: it trusts the
-principal each `Hello` claims and takes the account credential bytes as the account. Anything else is refused at
-startup. See [`docs/PROTOCOL.md`](docs/PROTOCOL.md) §Development mode.
+The hub authenticates every connection with a certificate chain ending at an account's root key, and admits a new
+account either with an operator invite (`--registration invite`, the default) or to anyone, rate limited
+(`--registration open`). It speaks plain websockets: put TLS in front of it (Tailscale, Caddy). Every option has a
+`WMLHUB_*` environment variable; `wmlhub serve --help` lists them.
 
 ## Building
 

@@ -98,6 +98,19 @@ fn envelope(to: To, kind: Kind, payload: &[u8], reference: u64) -> Frame {
 }
 
 #[tokio::test]
+async fn every_connection_opens_with_a_fresh_challenge() {
+    let url = start(wmlhub::Config::default()).await;
+    let mut nonces = Vec::new();
+    for _ in 0..2 {
+        let mut ws = open(&url).await;
+        let Body::Challenge(c) = expect(&mut ws, |b| matches!(b, Body::Challenge(_))).await else { unreachable!() };
+        assert_eq!(c.nonce.len(), 32);
+        nonces.push(c.nonce);
+    }
+    assert_ne!(nonces[0], nonces[1]);
+}
+
+#[tokio::test]
 async fn a_published_envelope_reaches_a_subscriber_with_the_sender_stamped() {
     let url = start(wmlhub::Config::default()).await;
     let mut rt = join(&url, "alice", "rt", Role::Runtime).await;
@@ -148,9 +161,9 @@ async fn frames_batched_with_hello_are_routed() {
 async fn a_first_frame_that_is_not_hello_is_refused_and_closed() {
     let url = start(wmlhub::Config::default()).await;
     let mut ws = open(&url).await;
+    expect(&mut ws, |b| matches!(b, Body::Challenge(_))).await;
     send(&mut ws, &[subscribe("rt", "s1")]).await;
-    let frames = recv(&mut ws).await.unwrap();
-    assert!(matches!(&frames[0].body, Some(Body::Error(e)) if e.code() == Code::Invalid));
+    expect(&mut ws, |b| matches!(b, Body::Error(e) if e.code() == Code::Invalid)).await;
     assert!(recv(&mut ws).await.is_none());
 }
 
@@ -159,8 +172,7 @@ async fn a_hello_without_an_account_credential_is_unauthenticated() {
     let url = start(wmlhub::Config::default()).await;
     let mut ws = open(&url).await;
     send(&mut ws, &[hello("", "phone", Role::Client)]).await;
-    let frames = recv(&mut ws).await.unwrap();
-    assert!(matches!(&frames[0].body, Some(Body::Error(e)) if e.code() == Code::Unauthenticated));
+    expect(&mut ws, |b| matches!(b, Body::Error(e) if e.code() == Code::Unauthenticated)).await;
 }
 
 #[tokio::test]
