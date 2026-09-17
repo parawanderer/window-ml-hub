@@ -18,13 +18,15 @@ pub const MAX_FRAME_BYTES: usize = 1 << 20;
 /// A varint longer than this many bytes encodes more than 64 bits, which no length we send ever needs.
 const MAX_VARINT_BYTES: usize = 10;
 
-/// Why a stream cannot be framed. Both are corruption, not a short read: the stream is unusable afterwards.
+/// Why a stream cannot be framed. Each is corruption, not a short read: the stream is unusable afterwards.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrameError {
     /// A length prefix ran past ten bytes.
     VarintTooLong,
     /// A frame declared (or a writer was handed) more bytes than the limit allows.
     TooLarge { len: u64, max: usize },
+    /// A unit that must hold whole frames (one websocket message) ended with `pending` bytes of an unfinished one.
+    Truncated { pending: usize },
 }
 
 impl fmt::Display for FrameError {
@@ -32,6 +34,7 @@ impl fmt::Display for FrameError {
         match self {
             FrameError::VarintTooLong => write!(f, "frame: varint too long"),
             FrameError::TooLarge { len, max } => write!(f, "frame: frame of {len} bytes refused (limit {max})"),
+            FrameError::Truncated { pending } => write!(f, "frame: message ended {pending} bytes into a frame"),
         }
     }
 }
