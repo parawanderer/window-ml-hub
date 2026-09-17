@@ -7,8 +7,10 @@
 pub mod registry;
 
 use std::collections::HashMap;
+use std::hash::{BuildHasher, RandomState};
 use std::io;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -56,6 +58,8 @@ pub struct Config {
     pub write_budget: usize,
     /// Sockets open at once, before or after `Hello`.
     pub max_sockets: usize,
+    /// Independent relay shards, each with its own lock; an account lives in exactly one. 0 picks four per core.
+    pub shards: usize,
 }
 
 impl Default for Config {
@@ -68,6 +72,7 @@ impl Default for Config {
             idle_timeout: Duration::from_secs(60),
             write_budget: 256 << 10,
             max_sockets: 10_000,
+            shards: 0,
         }
     }
 }
@@ -79,9 +84,25 @@ struct Handle {
     closing: Mutex<Option<Frame>>,
 }
 
+/// One shard: a relay and the wake-up handles of the connections it holds, under one lock. Accounts are spread across
+/// shards by a keyed hash, so tenants on different shards never wait for each other. Measured before this existed:
+/// at 100k deliveries/s most of the hub's non-idle samples were threads waiting on the single global lock
+/// (docs/perf/README.md).
+struct ShardState {
+    hub: Hub,
+    handles: HashMap<ConnId, Arc<Handle>>,
+    /// this shard's contribution to `Shared::accounts`, as last reconciled
+    accounts: usize,
+}
+
 struct Shared {
-    hub: Mutex<Hub>,
-    handles: Mutex<HashMap<ConnId, Arc<Handle>>>,
+    shards: Box<[Mutex<ShardState>]>,
+    /// Accounts across every shard, kept exact: a new account reserves a slot before it is admitted, and every call
+    /// reconciles its shard's count. `Limits::max_accounts` is enforced here, not per shard.
+    accounts: AtomicUsize,
+    /// Keyed per process, so nobody can choose an account id (they are key hashes, easy to grind) that lands on the
+    /// same shard as someone else's.
+    shard_hasher: RandomState,
     config: Config,
 }
 
@@ -91,23 +112,96 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Shared {
-    fn apply(&self, actions: Vec<Action>) {
-        let handles = lock(&self.handles);
-        for action in actions {
-            match action {
-                Action::Wake(conn) => {
-                    if let Some(h) = handles.get(&conn) {
-                        h.notify.notify_one();
-                    }
-                }
-                Action::Close { conn, frame } => {
-                    if let Some(h) = handles.get(&conn) {
-                        *lock(&h.closing) = Some(frame);
-                        h.notify.notify_one();
+    fn shard_of(&self, account: &AccountId) -> usize {
+        (self.shard_hasher.hash_one(&account.0) % self.shards.len() as u64) as usize
+    }
+
+    /// Run `f` on a shard's relay, then act on what it asked for. Wake-ups happen after the lock is released.
+    fn on_shard<R>(&self, shard: usize, f: impl FnOnce(&mut Hub) -> (R, Vec<Action>)) -> R {
+        let mut wake = Vec::new();
+        let result = {
+            let mut st = lock(&self.shards[shard]);
+            let (result, actions) = f(&mut st.hub);
+            for action in actions {
+                match action {
+                    Action::Wake(conn) => wake.extend(st.handles.get(&conn).cloned()),
+                    Action::Close { conn, frame } => {
+                        if let Some(h) = st.handles.get(&conn) {
+                            *lock(&h.closing) = Some(frame);
+                            wake.push(h.clone());
+                        }
                     }
                 }
             }
+            self.reconcile_accounts(&mut st, 0);
+            result
+        };
+        for h in wake {
+            h.notify.notify_one();
         }
+        result
+    }
+
+    /// Bring the global account count in line with this shard's, in one step. `reserved` is a slot this call already
+    /// added to the global count for an account it was about to create: if the account now exists the slot simply
+    /// becomes it, and if not the slot is released, with no moment in between where the count is low.
+    fn reconcile_accounts(&self, st: &mut ShardState, reserved: usize) {
+        let now = st.hub.account_count();
+        let change = now as isize - st.accounts as isize - reserved as isize;
+        if change > 0 {
+            self.accounts.fetch_add(change as usize, Ordering::Relaxed);
+        } else if change < 0 {
+            self.accounts.fetch_sub(change.unsigned_abs(), Ordering::Relaxed);
+        }
+        st.accounts = now;
+    }
+
+    /// Admit a connection to its account's shard, enforcing the account limit across all shards.
+    fn connect(
+        &self,
+        shard: usize,
+        account: AccountId,
+        hello: &v1::Hello,
+        handle: Arc<Handle>,
+    ) -> Result<ConnId, Box<Frame>> {
+        let max = self.config.limits.max_accounts;
+        let mut wake = Vec::new();
+        let result = {
+            let mut st = lock(&self.shards[shard]);
+            let reserved = if st.hub.has_account(&account) {
+                0
+            } else {
+                // Reserve with a compare-and-swap before admitting, so two shards admitting at once cannot both take
+                // the last slot. (A load-then-add passed the concurrency test too: the window is nanoseconds wide and
+                // the test does not reach it. The correctness of this line rests on the CAS, not on that test.)
+                let taken = self
+                    .accounts
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| (n < max).then_some(n + 1))
+                    .is_ok();
+                if !taken {
+                    return Err(Box::new(error_frame(Code::Limit, "relay is full")));
+                }
+                1
+            };
+            let result = st.hub.connect(account, hello, now_ms());
+            self.reconcile_accounts(&mut st, reserved);
+            match result {
+                Ok((id, actions)) => {
+                    st.handles.insert(id, handle);
+                    for action in actions {
+                        if let Action::Wake(conn) = action {
+                            wake.extend(st.handles.get(&conn).cloned());
+                        }
+                    }
+                    Ok(id)
+                }
+                Err(frame) => Err(frame),
+            }
+        };
+        for h in wake {
+            h.notify.notify_one();
+        }
+        result
     }
 }
 
@@ -121,9 +215,23 @@ fn now_ms() -> u64 {
 
 /// Accept connections on `listener` until it fails. `epoch_seed` should differ across restarts.
 pub async fn serve(listener: TcpListener, config: Config, epoch_seed: u64) -> io::Result<()> {
-    let hub = Hub::new(config.limits.clone(), epoch_seed).map_err(|e| io::Error::other(e.0))?;
+    let count = match config.shards {
+        0 => std::thread::available_parallelism().map_or(4, |n| n.get() * 4),
+        n => n,
+    }
+    .clamp(1, 1024);
+    // Each shard's relay may hold any number of accounts; the server enforces the limit across all of them.
+    let shard_limits = Limits { max_accounts: usize::MAX, ..config.limits.clone() };
+    let shards = (0..count)
+        .map(|i| {
+            let hub = Hub::with_id_space(shard_limits.clone(), epoch_seed.wrapping_add(i as u64), i as u16)
+                .map_err(|e| io::Error::other(e.0))?;
+            Ok(Mutex::new(ShardState { hub, handles: HashMap::new(), accounts: 0 }))
+        })
+        .collect::<io::Result<Vec<_>>>()?
+        .into_boxed_slice();
     let sockets = Arc::new(Semaphore::new(config.max_sockets));
-    let shared = Arc::new(Shared { hub: Mutex::new(hub), handles: Mutex::new(HashMap::new()), config });
+    let shared = Arc::new(Shared { shards, accounts: AtomicUsize::new(0), shard_hasher: RandomState::new(), config });
     loop {
         let (tcp, peer) = listener.accept().await?;
         let Ok(permit) = sockets.clone().try_acquire_owned() else {
@@ -187,27 +295,17 @@ async fn connection(shared: Arc<Shared>, tcp: TcpStream, address: IpAddr) {
         }
     };
     let handle = Arc::new(Handle::default());
-    let connected = {
-        // Registering the handle under the hub lock means every action naming this connection is produced after
-        // its handle exists, so no wake is lost.
-        let mut hub = lock(&shared.hub);
-        let result = hub.connect(account, &hello, now_ms());
-        if let Ok((id, _)) = &result {
-            lock(&shared.handles).insert(*id, handle.clone());
-        }
-        result
-    };
-    let (id, actions) = match connected {
-        Ok(ok) => ok,
+    let shard = shared.shard_of(&account);
+    let id = match shared.connect(shard, account, &hello, handle.clone()) {
+        Ok(id) => id,
         Err(frame) => {
             let _ = send(&mut sink, &[*frame], max_frame).await;
             return;
         }
     };
-    tracing::info!(conn = id, role = ?hello.role(), "connected");
-    shared.apply(actions);
+    tracing::info!(conn = id, shard, role = ?hello.role(), "connected");
 
-    let mut writer = tokio::spawn(write_loop(shared.clone(), id, handle, sink));
+    let mut writer = tokio::spawn(write_loop(shared.clone(), shard, id, handle, sink));
     // true once the relay has queued a closing error the writer should get out before the socket goes
     let mut flush = false;
     let mut writer_done = false;
@@ -216,8 +314,7 @@ async fn connection(shared: Arc<Shared>, tcp: TcpStream, address: IpAddr) {
     let mut pending: Vec<Frame> = frames.collect();
     'read: loop {
         for frame in pending.drain(..) {
-            let actions = lock(&shared.hub).receive(id, frame);
-            shared.apply(actions);
+            shared.on_shard(shard, |hub| ((), hub.receive(id, frame)));
         }
         let next = tokio::select! {
             next = tokio::time::timeout(shared.config.idle_timeout, stream.next()) => next,
@@ -243,27 +340,25 @@ async fn connection(shared: Arc<Shared>, tcp: TcpStream, address: IpAddr) {
             // closed, errored or ended
             _ => break 'read,
         };
-        let actions = lock(&shared.hub).close(id, Some(close_with));
-        shared.apply(actions);
+        shared.on_shard(shard, |hub| ((), hub.close(id, Some(close_with))));
         flush = true;
         break 'read;
     }
 
-    let actions = lock(&shared.hub).close(id, None);
-    shared.apply(actions);
+    shared.on_shard(shard, |hub| ((), hub.close(id, None)));
     if !writer_done {
         // A closing error gets a moment to go out; a peer that simply left gets none, since nothing wakes the writer.
         if !flush || tokio::time::timeout(Duration::from_secs(2), &mut writer).await.is_err() {
             writer.abort();
         }
     }
-    lock(&shared.handles).remove(&id);
+    lock(&shared.shards[shard]).handles.remove(&id);
     tracing::info!(conn = id, "disconnected");
 }
 
 type Sink = futures_util::stream::SplitSink<tokio_tungstenite::WebSocketStream<TcpStream>, Message>;
 
-async fn write_loop(shared: Arc<Shared>, id: ConnId, handle: Arc<Handle>, mut sink: Sink) {
+async fn write_loop(shared: Arc<Shared>, shard: usize, id: ConnId, handle: Arc<Handle>, mut sink: Sink) {
     let max_frame = shared.config.limits.max_frame_bytes;
     let mut ping = tokio::time::interval(shared.config.ping_interval);
     ping.tick().await;
@@ -280,7 +375,7 @@ async fn write_loop(shared: Arc<Shared>, id: ConnId, handle: Arc<Handle>, mut si
             }
         }
         loop {
-            let frames = lock(&shared.hub).take_outbound(id, shared.config.write_budget);
+            let frames = lock(&shared.shards[shard]).hub.take_outbound(id, shared.config.write_budget);
             if frames.is_empty() {
                 break;
             }

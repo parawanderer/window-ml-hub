@@ -75,9 +75,31 @@ p50, p99 and CPU overlap. p99.9 with 8 KiB was higher than 128 KiB in all three 
 so the p99.9 spread on this machine is wider than any effect of buffer size that three rounds can show. 8 KiB is kept
 for 7x less memory per connection. Revisit on a dedicated machine, where tail latency can be measured properly.
 
+### Sharding by account
+
+The server runs N independent relays (default four per core), each under its own lock, and routes each connection to
+one by a keyed hash of its account; the account limit is enforced across shards with a compare-and-swap reservation.
+Before is `main` at `582e348`; three rounds each, 100k deliveries/s offered, every delivery arrived in every run.
+
+| scenario | build | transit p50 | transit p99 | hub CPU per 1k deliveries |
+| --- | --- | --- | --- | --- |
+| 10 accounts x 5 subscribers x 4 channels | before | 320-461 us | 1.31-7.69 ms | 12.0-14.8 us |
+| | after | 232-338 us | 1.34-4.72 ms | **5.8-9.2 us** |
+| 50 accounts x 2 subscribers x 2 channels | before | 521-566 us | 1.41-4.83 ms | 19.4-23.9 us |
+| | after | 344-460 us | 0.83-2.29 ms | **9.8-13.8 us** |
+| 1 account x 50 subscribers x 4 channels | before | 250-390 us | 1.10-4.20 ms | 6.6-10.5 us |
+| | after | 260-424 us | 1.29-1.80 ms | 6.1-9.8 us |
+
+- With several accounts, CPU per delivery roughly halves and median transit drops; the ranges do not overlap.
+- With one account the ranges overlap: sharding cannot help a single tenant, and it costs nothing measurable.
+- p99 and p99.9 stay inside the machine's noise (p99.9 ranged 2.7-46 ms across these runs).
+
+`sample` over 5 s at 50 accounts, before -> after: `__psynch_mutexwait` 12,482 -> 596, `__psynch_mutexdrop` 1,456 -> 44.
+What is left on top is `kevent` (2,506) and `sendto` (1,455): the IO reactor and a syscall per websocket message.
+
 ## Next (from the profile)
 
-1. Shard the relay by account, so tenants do not share a lock.
+1. ~~Shard the relay by account, so tenants do not share a lock.~~ Done, above.
 2. Encode a published envelope once and share its bytes across subscribers and backfill.
 3. Fixed-size ids instead of `Vec<u8>` keys; bounded-cost eviction for the ring byte budget.
 4. Fewer syscalls per message on the write path.

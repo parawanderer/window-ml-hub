@@ -217,3 +217,62 @@ async fn a_slow_consumer_is_told_and_disconnected() {
     expect(&mut phone, |b| matches!(b, Body::Error(e) if e.code() == Code::SlowConsumer)).await;
     assert!(recv(&mut phone).await.is_none(), "socket stayed open");
 }
+
+#[tokio::test]
+async fn the_account_limit_holds_across_shards() {
+    let limits = wmlhub_relay::Limits { max_accounts: 2, ..wmlhub_relay::Limits::default() };
+    let url = start(wmlhub::Config { limits, shards: 8, ..wmlhub::Config::default() }).await;
+    let a = join(&url, "a", "p", Role::Client).await;
+    let _b = join(&url, "b", "p", Role::Client).await;
+    // a third account is refused wherever it hashes to
+    let mut c = open(&url).await;
+    send(&mut c, &[hello("c", "p", Role::Client)]).await;
+    expect(&mut c, |b| matches!(b, Body::Error(e) if e.code() == Code::Limit)).await;
+    // another connection of a known account is not a new account
+    let _a2 = join(&url, "a", "q", Role::Client).await;
+    // when an account is gone, its slot is free again
+    drop(a);
+    drop(_a2);
+    let mut admitted = false;
+    for _ in 0..50 {
+        let mut d = open(&url).await;
+        send(&mut d, &[hello("d", "p", Role::Client)]).await;
+        if matches!(expect(&mut d, |b| matches!(b, Body::Welcome(_) | Body::Error(_))).await, Body::Welcome(_)) {
+            admitted = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(admitted, "a freed account slot was never reused");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn concurrent_new_accounts_never_exceed_the_limit() {
+    let limits = wmlhub_relay::Limits { max_accounts: 5, ..wmlhub_relay::Limits::default() };
+    let url = start(wmlhub::Config { limits, shards: 8, ..wmlhub::Config::default() }).await;
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(60));
+    let tasks: Vec<_> = (0..60)
+        .map(|i| {
+            let (url, barrier) = (url.clone(), barrier.clone());
+            tokio::spawn(async move {
+                let mut ws = open(&url).await;
+                expect(&mut ws, |b| matches!(b, Body::Challenge(_))).await;
+                barrier.wait().await;
+                send(&mut ws, &[hello(&format!("acct{i}"), "p", Role::Client)]).await;
+                let welcomed = matches!(
+                    expect(&mut ws, |b| matches!(b, Body::Welcome(_) | Body::Error(_))).await,
+                    Body::Welcome(_)
+                );
+                (welcomed, ws)
+            })
+        })
+        .collect();
+    let mut sockets = Vec::new();
+    let mut admitted = 0;
+    for t in tasks {
+        let (welcomed, ws) = t.await.unwrap();
+        admitted += usize::from(welcomed);
+        sockets.push(ws);
+    }
+    assert_eq!(admitted, 5);
+}

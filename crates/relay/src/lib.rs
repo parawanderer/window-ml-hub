@@ -110,6 +110,12 @@ fn error(code: Code, reference: u64, message: &str) -> Frame {
 impl Hub {
     /// A relay with these limits. `epoch_seed` makes ring epochs differ across restarts; pass something random.
     pub fn new(limits: Limits, epoch_seed: u64) -> Result<Self, ConfigError> {
+        Self::with_id_space(limits, epoch_seed, 0)
+    }
+
+    /// A relay that is shard `shard` of several: its connection ids carry the shard in their top 16 bits, so ids from
+    /// different shards never collide. Shards share nothing else; the relay never needs two accounts at once.
+    pub fn with_id_space(limits: Limits, epoch_seed: u64, shard: u16) -> Result<Self, ConfigError> {
         if limits.ring_session_events > limits.queue_session_events {
             return Err(ConfigError("a session-events backfill must fit in a connection's queue"));
         }
@@ -120,7 +126,7 @@ impl Hub {
             limits,
             accounts: HashMap::new(),
             conn_account: HashMap::new(),
-            next_conn: 1,
+            next_conn: (u64::from(shard) << 48) + 1,
             epoch_state: epoch_seed,
             clock: 0,
         })
@@ -129,6 +135,17 @@ impl Hub {
     /// The limits in force.
     pub fn limits(&self) -> &Limits {
         &self.limits
+    }
+
+    /// Whether this relay holds state for `account`. A server running several shards asks before admitting a new
+    /// account, to enforce a limit across all of them.
+    pub fn has_account(&self, account: &AccountId) -> bool {
+        self.accounts.contains_key(account)
+    }
+
+    /// How many accounts this relay holds state for.
+    pub fn account_count(&self) -> usize {
+        self.accounts.len()
     }
 
     /// Admit a connection whose `Hello` the server has authenticated into `account`. On success the `Welcome` and
