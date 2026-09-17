@@ -63,7 +63,8 @@ Which repository owns which wire schema, and how the others pin it: [`docs/SCHEM
 | `crates/relay` | the routing core with no IO: accounts, presence, streams and rings, backpressure, limits |
 | `proto/` | the hub's wire schema; rules in [`docs/PROTOCOL.md`](docs/PROTOCOL.md) |
 | `tools/mv3-ws-probe` | the probe that showed a websocket keeps an MV3 service worker alive |
-| `docs/` | roadmap, schema ownership, findings |
+| `tools/webcrypto-probe` | the probe listing which WebCrypto primitives an MV3 service worker has |
+| `docs/` | roadmap, protocol, schema ownership, design proposals, findings |
 
 ## Running it
 
