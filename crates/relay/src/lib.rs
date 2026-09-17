@@ -206,7 +206,7 @@ impl Hub {
             // answers to the hub's own pings, and errors a peer reports: nothing to route
             Some(Body::Pong(_)) | Some(Body::Error(_)) => {}
             Some(Body::Hello(_)) => fx.close.push((conn, error(Code::Invalid, 0, "hello sent twice"))),
-            Some(Body::Welcome(_) | Body::Backfilled(_) | Body::Gap(_) | Body::Presence(_)) => {
+            Some(Body::Welcome(_) | Body::Backfilled(_) | Body::Gap(_) | Body::Presence(_) | Body::Challenge(_)) => {
                 fx.close.push((conn, error(Code::Invalid, 0, "a hub-to-peer frame sent to the hub")));
             }
             None => self.enqueue(&account, conn, error(Code::Unsupported, 0, "unknown frame"), &mut fx),

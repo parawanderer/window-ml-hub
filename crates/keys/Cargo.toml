@@ -1,0 +1,18 @@
+[package]
+name = "wmlhub-keys"
+version = "0.1.0"
+description = "Identities, certificate chains and the signed hello for the window.ml hub"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+ed25519-dalek = "3"
+getrandom = "0.4"
+sha2 = "0.11"
+wmlhub-proto = { path = "../proto" }
+
+[lints]
+workspace = true

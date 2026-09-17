@@ -61,6 +61,7 @@ fn hello(account: &str, principal: &str, role: Role) -> Frame {
             principal: principal.as_bytes().to_vec(),
             role: role as i32,
             account_credential: account.as_bytes().to_vec(),
+            ..Default::default()
         })),
     }
 }

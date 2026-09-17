@@ -1,6 +1,6 @@
 # Proposal: keys, accounts and end-to-end encryption
 
-**Status: proposal, awaiting a decision** (2026-09-17). Roadmap steps 5 and 6. Built on the finding
+**Status: decided 2026-09-17; being built** (identities and certificates: `crates/keys`). Roadmap steps 5 and 6. Built on the finding
 [`webcrypto-in-mv3-worker.md`](../findings/webcrypto-in-mv3-worker.md). The requirements are window-ml
 `docs/spec/RUNTIME_HUB.md` §Security: the hub relays ciphertext and routing metadata only, cannot read or forge a
 command, every command is signed with a nonce and a clock window, keys never reach the page's main world.
@@ -46,17 +46,17 @@ the upgrade path, not the start.
 
 ### Accounts (step 5), from the same keys
 
-- **An account is a root Ed25519 key**, created on the first device and kept there (or exported once to paper for
-  recovery; to decide). The account id is `SHA-256(root public key)`.
+- **An account is a root Ed25519 key**, created on the first device and kept there, never exported (decision 4). The
+  account id is `SHA-256(root public key)`. The root signs certificates only; the first device also gets its own
+  identity key, certified by the root, to log in with.
 - **Pairing a device or runtime** is the root key (or a device holding a delegated grant) signing a **device
   certificate**: the new principal's identity key, its role, its scopes, an expiry. Done in person: the runtime shows
   a QR code or short code, the device confirms it (`RUNTIME_HUB.md` §Security 2).
 - **The hub authenticates `Hello` with that chain**: the principal signs a challenge the hub sends, and presents its
   certificate. The hub verifies signatures with public keys only. It learns the account id and the principal id, which
   it sees already, and holds no secret it could leak. This replaces a separate account password or token.
-- **Creating an account** is therefore free for anyone who can reach the hub, which is a denial-of-service question
-  for the hub operator, not a security one: rate limits per source address, or an operator-issued invite required to
-  register a new root key. (To decide; an invite is simplest for a personal hub.)
+- **Creating an account** would otherwise be free for anyone who can reach the hub, which is a denial-of-service
+  question for the hub operator, not a security one; decision 3 makes it a setting.
 
 ### Commands and results (direct)
 
@@ -99,14 +99,20 @@ A command result is sealed back the same way and names the command's nonce.
 Unchanged from the spec: account and principal ids, who is online, sizes, timing, channel identifiers (keyed, so not
 session hashes), and envelope kinds. Payload padding to size buckets for session events stays open.
 
-## Decisions needed
+## Decisions (2026-09-17)
 
-1. **HPKE-style boxes** over Noise and libsodium, with MLS as the later upgrade path. (Recommended.)
-2. **Accounts as root keys with device certificates**, verified by the hub, instead of a separate hub credential.
-   (Recommended.)
-3. **Registering a new account**: open with rate limits, or an operator invite. (Suggest: invite, for now.)
-4. **Root key recovery**: none (lose every device, start a new account), or a one-time export to paper.
-5. **Signing every published envelope** (or batch) with the publisher's identity key. (Recommended.)
+1. **HPKE-style boxes** (X25519, HKDF-SHA256, AES-256-GCM, Ed25519 signatures), with MLS kept as the upgrade path if
+   device sets start churning.
+2. **An account is a root key**; devices hold certificates chaining to it, and the hub verifies them with public
+   keys only. No separate hub password or token.
+3. **Registration is a setting**: `invite` (the default: a new account root needs an operator-issued, single-use
+   invite) or `open` (any valid root, rate limited per source address). Both modes are tested.
+4. **No root key export.** Losing the account costs a re-pairing, not data, and a paper copy is a standing credential
+   that can mint a device with `approve`. Instead, the root can give a second device you own a `may_pair`
+   certificate, so losing one device is survivable; losing all of them means a new account.
+5. **One Ed25519 signature per published envelope**, with events batched into envelopes (~100 ms). The signature
+   covers the publisher's own counter, the channel and the stream key id, so a hub that replays, reorders or splices
+   envelopes is caught by the client.
 
 ## Not decided here
 

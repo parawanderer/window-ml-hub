@@ -10,8 +10,16 @@ this document is the rules and the reasons. It is the only format the hub reads.
 - **Each message holds one or more varint-delimited `Frame`s** (`crates/frame`, the framing window-ml's
   `protostream.ts` reads), so a busy source batches without a second framing layer. A message that ends mid-frame is
   corrupt and closes the connection.
-- **The first frame is `Hello`.** The hub answers `Welcome` (with the protocol version it chose, its clock and the
-  limits it enforces) or `Error` and closes.
+- **The hub speaks first, with `Challenge`**: a fresh 32-byte nonce, the hub's configured name and its clock.
+- **The principal answers `Hello`**: its role, its account root key, its certificate chain (leaf first, one or two
+  certificates, ending at the root), and an Ed25519 signature by the leaf key over the hello transcript (the hub's
+  name, the nonce, the principal id, the role and the account id; `crates/keys` `hello_transcript`). A client checks
+  the challenge's hub name is the hub it meant to reach before signing, so a malicious hub cannot pass another hub's
+  challenge along. The hub verifies the chain and the signature with public keys only (`crates/keys`), derives the
+  account from the root and the principal from the leaf, and answers `Welcome` (the protocol version it chose, its
+  clock, the limits it enforces) or `Error` and closes. Identities and certificates are specified in
+  [`proto/wmlhub/v1/identity.proto`](../proto/wmlhub/v1/identity.proto) and
+  [`design/end-to-end-crypto.md`](design/end-to-end-crypto.md).
 
 ## Accounts are decided once, per connection
 
