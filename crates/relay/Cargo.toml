@@ -9,7 +9,15 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+arbitrary = { version = "1", features = ["derive"], optional = true }
 wmlhub-proto = { path = "../proto" }
+
+[dev-dependencies]
+arbitrary = { version = "1", features = ["derive"] }
+
+[features]
+# The model checker (`model`), for the fuzz targets. Tests get it without the feature.
+testing = ["dep:arbitrary"]
 
 [lints]
 workspace = true

@@ -6,6 +6,8 @@
 //! first; a payload is moved, never read; every collection is bounded by [`Limits`].
 
 mod limits;
+#[cfg(any(test, feature = "testing"))]
+pub mod model;
 mod queue;
 mod ring;
 
@@ -360,6 +362,11 @@ impl Hub {
             return;
         }
         let acct = self.accounts.get_mut(account).expect("connection's account exists");
+        if let Some(c) = acct.conns.get_mut(&conn) {
+            // A repeated Subscribe replaces the subscription: anything still queued for this stream would otherwise
+            // be delivered and then delivered again by the backfill.
+            c.out.purge_stream(&key);
+        }
         let stream = acct.streams.get_mut(&key).expect("ensured above");
         stream.subscribers.insert(conn);
         let (envelopes, epoch, seq, truncated) = match &stream.ring {
@@ -420,6 +427,7 @@ impl Hub {
         let Some(acct) = self.accounts.get_mut(account) else { return };
         if let Some(c) = acct.conns.get_mut(&conn) {
             c.subs.remove(key);
+            c.out.purge_stream(key);
         }
         if let Some(s) = acct.streams.get_mut(key) {
             s.subscribers.remove(&conn);
@@ -505,3 +513,56 @@ impl Hub {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod model_tests {
+    /// Seeded random runs of the model checker on every `cargo test`. The fuzz target `relay` explores further.
+    /// The byte strings the seeded runs use, deterministic across machines (xorshift64).
+    pub(super) fn seeded_runs() -> impl Iterator<Item = Vec<u8>> {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        std::iter::repeat_with(move || {
+            let mut next = || {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state
+            };
+            let len = 64 + (next() % 4000) as usize;
+            (0..len).map(|_| next() as u8).collect()
+        })
+    }
+
+    #[test]
+    fn random_operation_sequences_keep_every_invariant() {
+        for (run, data) in seeded_runs().enumerate().take(400) {
+            if let Err(e) = super::model::Model::run_bytes(&data) {
+                panic!(
+                    "run {run} broke an invariant: {e}\n(print its ops: RUN={run} cargo test -p wmlhub-relay print_model_run -- --ignored --nocapture)"
+                );
+            }
+        }
+    }
+}
+
+/// Debugging aid, not a test: print the operation sequence of one seeded model run.
+/// `RUN=8 cargo test -p wmlhub-relay print_model_run -- --ignored --nocapture`
+#[cfg(test)]
+mod model_debug {
+    #[test]
+    #[ignore]
+    fn print_model_run() {
+        use arbitrary::{Arbitrary, Unstructured};
+        let target: usize = std::env::var("RUN").expect("set RUN to the failing run number").parse().expect("a number");
+        for (run, data) in super::model_tests::seeded_runs().enumerate().take(target + 1) {
+            if run == target {
+                let mut u = Unstructured::new(&data);
+                let _ = u64::arbitrary(&mut u);
+                let mut i = 0;
+                while let Ok(op) = super::model::Op::arbitrary(&mut u) {
+                    println!("{i}: {op:?}");
+                    i += 1;
+                }
+            }
+        }
+    }
+}

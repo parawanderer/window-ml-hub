@@ -1,0 +1,50 @@
+# Coverage-guided fuzzing (cargo-fuzz, nightly). Not a workspace member: it needs nightly and libFuzzer.
+#   cargo +nightly fuzz run relay -- -max_total_time=60
+# See docs/FUZZING.md.
+[package]
+name = "wmlhub-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = "1"
+libfuzzer-sys = "0.4"
+wmlhub-frame = { path = "../crates/frame" }
+wmlhub-keys = { path = "../crates/keys" }
+wmlhub-proto = { path = "../crates/proto" }
+wmlhub-relay = { path = "../crates/relay", features = ["testing"] }
+
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "relay"
+path = "fuzz_targets/relay.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "frames"
+path = "fuzz_targets/frames.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "frame_reader"
+path = "fuzz_targets/frame_reader.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "chain"
+path = "fuzz_targets/chain.rs"
+test = false
+doc = false
+bench = false

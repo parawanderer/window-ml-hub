@@ -382,3 +382,17 @@ fn limits_that_cannot_work_are_refused() {
     let bad = Limits { ring_session_events: 10, queue_session_events: 5, ..Limits::default() };
     assert!(Hub::new(bad, 0).is_err());
 }
+
+#[test]
+fn resubscribing_with_envelopes_still_queued_delivers_each_seq_once_in_order() {
+    let mut h = hub();
+    let rt = join(&mut h, "alice", "rt", Role::Runtime);
+    let phone = join(&mut h, "alice", "phone", Role::Client);
+    h.receive(phone, subscribe("rt", "s1", None));
+    h.receive(rt, publish("s1", Kind::SessionEvents, b"a"));
+    h.receive(rt, publish("s1", Kind::SessionEvents, b"b"));
+    // the phone has not drained; it resubscribes from the start
+    h.receive(phone, subscribe("rt", "s1", None));
+    let got: Vec<String> = out(&mut h, phone).into_iter().filter(|l| l.starts_with("env")).collect();
+    assert_eq!(got, ["env from=rt seq=1 a", "env from=rt seq=2 b"]);
+}
