@@ -6,12 +6,27 @@ schema is vendored at `proto/vendor/ollama/api/events.proto`; see [`../SCHEMAS.m
 
 ## Reading the stream
 
+- **Ask for the binary stream** (`Accept: application/protobuf`), and cut it at the varint lengths with
+  `crates/frame`: the stream uses the same framing as the hub. **Each frame's bytes go into an envelope unchanged.**
+  Nothing between the box and the client decodes and re-encodes a frame, which is the reason the binary encoding was
+  built.
 - Connect with `?since=<ms>` sized to what the connector may have missed, and check `retainedMs` on the hello: the
   ring may reach less far back than asked.
-- **Convert `t` on ingest** to absolute time with the hello's `serverTime`. `t` is relative to this connection's
-  hello and means nothing to a client that connected later.
+- **Time is the open problem for verbatim relay.** `t` is milliseconds since the connector's own `hello`, which a
+  client that joins later never saw, and rewriting `t` would mean re-encoding. Asked of the fork (mlbox
+  `inbox/ui-api/handover-events-binary-relay.md`): an absolute timestamp on every frame. Until it exists the connector
+  publishes each connection's `hello` on the edge channel, and clients resolve `t` against the latest `hello` they
+  hold.
 - `dropped` counts what the connector itself lost on the box link. It is the box's count, not the connector's: keep a
   separate count of anything the connector coalesces, so no gap is ever drawn as a flat line.
+
+## Reading a frame without decoding it
+
+Coalescing needs two facts per frame: its `kind` (field 2) and, for a `sample`, whether it carries `info` (field 28).
+The connector reads them by walking the frame's top-level tags (a varint key, then skip the value by its wire type)
+and decodes nothing else. `kind` is in the schema's stability list; `info` has been asked to be. A frame whose tags do
+not parse is relayed on the lossless channel as it is, never dropped: an unreadable frame is a question for the
+client, not a reason for the relay to lose it.
 
 ## What may be coalesced, and what never
 
@@ -43,6 +58,10 @@ So the connector publishes on **two channels per box**:
 A client merges the two by absolute time, which is why `t` is converted on ingest.
 
 ## Open
+
+- An absolute timestamp per frame (asked); until then, the `hello` travels on the edge channel.
+- The largest frame the box emits (asked), against the relay's 1 MiB payload limit.
+- What the binary stream does if the encoder refuses a frame (asked): the connector must not reconnect in a loop.
 
 - Captures of `evict`, `load.failed` and `lease.*` for conformance vectors: the fork maintainer offered to record them
   when the box is idle.
