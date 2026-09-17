@@ -178,13 +178,17 @@ async fn fanout(
 ) {
     let epoch = Instant::now();
     let delivered = Arc::new(AtomicU64::new(0));
+    // websocket messages the subscribers received: the hub feeds one per batch it takes and flushes once per wake-up,
+    // so envelopes per message is roughly how many deliveries share a write
+    let messages = Arc::new(AtomicU64::new(0));
     let (hist_tx, mut hist_rx) = mpsc::unbounded_channel::<(Histogram<u64>, Histogram<u64>)>();
     let ready = Arc::new(Barrier::new(accounts * subscribers + 1));
     let stop_at = Duration::from_secs(seconds + 2);
 
     for a in 0..accounts {
         for s in 0..subscribers {
-            let (url, delivered, hist_tx, ready) = (url.to_owned(), delivered.clone(), hist_tx.clone(), ready.clone());
+            let (url, delivered, messages, hist_tx, ready) =
+                (url.to_owned(), delivered.clone(), messages.clone(), hist_tx.clone(), ready.clone());
             tokio::spawn(async move {
                 let mut ws = connect(&url, &format!("acct{a}"), &format!("client{s}"), Role::Client).await;
                 for c in 0..channels {
@@ -207,6 +211,7 @@ async fn fanout(
                     let next = tokio::time::timeout_at(deadline, ws.next()).await;
                     let Ok(Some(Ok(Message::Binary(bytes)))) = next else { break };
                     let now = epoch.elapsed().as_micros() as u64;
+                    messages.fetch_add(1, Ordering::Relaxed);
                     for f in decode_frames(&bytes, MAX).unwrap() {
                         if let Some(Body::Envelope(e)) = f.body {
                             let scheduled = u64::from_le_bytes(e.payload[..8].try_into().unwrap());
@@ -318,6 +323,10 @@ async fn fanout(
         subscribers
     );
     println!("  delivered {got} of {expected} ({:.2}%)", 100.0 * got as f64 / expected.max(1) as f64);
+    println!(
+        "  batching  {:.2} envelopes per websocket message received",
+        got as f64 / messages.load(Ordering::Relaxed).max(1) as f64
+    );
     println!(
         "  latency   p50 {} us  p90 {} us  p99 {} us  p99.9 {} us  max {} us",
         merged.value_at_quantile(0.5),

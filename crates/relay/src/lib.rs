@@ -48,7 +48,9 @@ impl StreamKey {
 /// What the server must do after a call.
 #[derive(Debug, PartialEq)]
 pub enum Action {
-    /// Frames are queued for this connection: drain them with [`Hub::take_outbound`].
+    /// Frames are queued for this connection: drain them with [`Hub::take_outbound`] until it reports nothing more.
+    /// Sent once per drain, not once per frame: frames queued while a wake is outstanding do not repeat it, so the
+    /// server must keep taking until [`Taken::more`] is false before it waits again.
     Wake(ConnId),
     /// Send this error frame, then close the connection. The relay has already forgotten it.
     Close { conn: ConnId, frame: Frame },
@@ -58,11 +60,32 @@ pub enum Action {
 #[derive(Debug, PartialEq, Eq)]
 pub struct ConfigError(pub &'static str);
 
+/// What [`Hub::take_outbound`] took.
+#[derive(Debug, Default)]
+pub struct Taken {
+    /// encoded frames, oldest first, each with its length prefix, ready to be joined into one websocket message
+    pub frames: Vec<Bytes>,
+    /// frames are still queued (the budget ran out): take again before waiting for a wake
+    pub more: bool,
+}
+
 #[derive(Debug)]
 struct Conn {
     principal: Vec<u8>,
     out: Outbound,
     subs: HashSet<StreamKey>,
+    /// a `Wake` was sent and this connection's queue has not been seen empty since
+    armed: bool,
+}
+
+impl Conn {
+    /// Wake the connection unless a wake is already outstanding. Every successful push goes through here.
+    fn arm(&mut self, id: ConnId, fx: &mut Effects) {
+        if !self.armed {
+            self.armed = true;
+            fx.wake(id);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -190,7 +213,8 @@ impl Hub {
         let id = self.next_conn;
         self.next_conn += 1;
         let mut fx = Effects::default();
-        let mut conn = Conn { principal: hello.principal.clone(), out: Outbound::default(), subs: HashSet::new() };
+        let mut conn =
+            Conn { principal: hello.principal.clone(), out: Outbound::default(), subs: HashSet::new(), armed: false };
         let welcome = v1::Welcome { protocol: PROTOCOL, server_time_ms: now_ms, limits: Some(self.limits.announce()) };
         // A fresh queue holds these without trouble; a failure here would be a limits misconfiguration.
         let _ = conn.out.push_frame(&Frame { body: Some(Body::Welcome(welcome)) }, &self.limits);
@@ -199,10 +223,10 @@ impl Hub {
             let _ = conn.out.push_frame(&Frame { body: Some(Body::Presence(p)) }, &self.limits);
         }
         let others: Vec<ConnId> = acct.conns.keys().copied().collect();
+        conn.arm(id, &mut fx);
         acct.conns.insert(id, conn);
         acct.online.insert(hello.principal.clone(), (id, role));
         self.conn_account.insert(id, account.clone());
-        fx.wake(id);
 
         let presence = v1::Presence { principal: hello.principal.clone(), role: role as i32, online: true };
         for other in others {
@@ -250,14 +274,17 @@ impl Hub {
         self.finish(fx)
     }
 
-    /// Frames queued for a connection, oldest first, up to about `budget` bytes.
-    /// Each item is one encoded frame, length prefix included, ready to be joined into a websocket message.
-    pub fn take_outbound(&mut self, conn: ConnId, budget: usize) -> Vec<Bytes> {
-        let Some(account) = self.conn_account.get(&conn) else { return Vec::new() };
-        self.accounts
-            .get_mut(account)
-            .and_then(|a| a.conns.get_mut(&conn))
-            .map_or_else(Vec::new, |c| c.out.take(budget))
+    /// Frames queued for a connection, oldest first, up to about `budget` bytes. When nothing is left the connection
+    /// is disarmed, and the next frame queued for it sends a new [`Action::Wake`].
+    pub fn take_outbound(&mut self, conn: ConnId, budget: usize) -> Taken {
+        let Some(account) = self.conn_account.get(&conn) else { return Taken::default() };
+        let Some(c) = self.accounts.get_mut(account).and_then(|a| a.conns.get_mut(&conn)) else {
+            return Taken::default();
+        };
+        let frames = c.out.take(budget);
+        let more = !c.out.is_empty();
+        c.armed = more;
+        Taken { frames, more }
     }
 
     fn on_envelope(&mut self, account: &AccountId, conn: ConnId, mut env: Envelope, fx: &mut Effects) {
@@ -337,7 +364,7 @@ impl Hub {
         for &sub in &stream.subscribers {
             let Some(c) = conns.get_mut(&sub) else { continue };
             match c.out.push_published(&stream.key, kind, epoch, &published.entry, limits) {
-                Ok(()) => fx.wake(sub),
+                Ok(()) => c.arm(sub, fx),
                 Err(SlowConsumer) => fx.close.push((sub, error(Code::SlowConsumer, 0, "fell behind"))),
             }
         }
@@ -356,7 +383,7 @@ impl Hub {
         let acct = self.accounts.get_mut(account).expect("connection's account exists");
         let c = acct.conns.get_mut(&target_conn).expect("online principals have connections");
         match c.out.push_frame(&Frame { body: Some(Body::Envelope(env)) }, &self.limits) {
-            Ok(()) => fx.wake(target_conn),
+            Ok(()) => c.arm(target_conn, fx),
             Err(SlowConsumer) => {
                 fx.close.push((target_conn, error(Code::SlowConsumer, 0, "fell behind")));
                 self.enqueue(account, conn, error(Code::Unavailable, reference, "recipient fell behind"), fx);
@@ -470,7 +497,7 @@ impl Hub {
     fn enqueue(&mut self, account: &AccountId, conn: ConnId, frame: Frame, fx: &mut Effects) {
         let Some(c) = self.accounts.get_mut(account).and_then(|a| a.conns.get_mut(&conn)) else { return };
         match c.out.push_frame(&frame, &self.limits) {
-            Ok(()) => fx.wake(conn),
+            Ok(()) => c.arm(conn, fx),
             Err(SlowConsumer) => fx.close.push((conn, error(Code::SlowConsumer, 0, "fell behind"))),
         }
     }

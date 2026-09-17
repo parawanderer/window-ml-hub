@@ -126,9 +126,49 @@ Before is `main` at `25317e1` (sharded). Three rounds each unless stated; every 
 - **Trap for anyone benchmarking memory here**: never use a power-of-two payload size. It lands on an allocator size
   class for one layout and just past it for another, and the comparison measures the allocator.
 
+### One wake per drain, and where the rest of the time goes
+
+Profiled at 500k deliveries/s (`fanout --accounts 50 --subscribers 5 --channels 4 --rate 2000 --payload 512`, 40
+shards) before choosing what to do next. The hub used about two cores, 4.7 us per delivery. Top of stack, one 5 s
+`sample`:
+
+| where | samples |
+| --- | --- |
+| `__sendto` | 5,737 |
+| `__psynch_mutexwait` (2,186 of them in `write_loop` locking its shard) | 2,690 |
+| `__recvfrom` | 1,148 |
+| `kevent` | 1,074 |
+| SipHash over ids (`DefaultHasher::write`, `hash_one`) | 290 |
+| `memcmp` | 68 |
+
+- **Ids are about 2% of on-CPU samples.** A fixed-size key would still be hashed byte by byte, so replacing `Vec<u8>`
+  keys cannot buy more than that at this load. Deferred until a profile says otherwise.
+- **The mutex waits are within an account.** With 40 shards and 50 accounts, a shard holds about one account: its
+  publisher's reader and its five subscribers' writers share the lock, and every publish woke all five.
+
+The relay now sends `Action::Wake` once per drain rather than once per queued frame (a connection is armed on its first
+push and disarmed when a take leaves its queue empty), and `take_outbound` reports `more`, so a writer no longer locks
+once extra to find its queue empty. The model checker holds the contract: a connection with anything queued has a wake
+outstanding. Before is `main` at `434c3c1`; three rounds each at the load above.
+
+| build | hub CPU per 1k deliveries | latency p50 | latency p99 | `mutexwait` samples | envelopes per write |
+| --- | --- | --- | --- | --- | --- |
+| before | 4.7, 4.8, 4.9 us | 1,251-1,268 us | 5.1-9.4 ms | 3,190, 2,822, 2,874 | 2.36-2.41 |
+| after | 4.6, 4.8, 4.7 us | 1,246-1,258 us | 4.0-8.1 ms | 1,853, 2,393, 1,524 | 2.28-2.40 |
+
+- **Lock waits fall by a third to a half; CPU and latency do not move.** A waiting thread is asleep, so fewer waits
+  show up as fewer context switches, not as less CPU at this load.
+- **`sendto` is the cost, and it is set by the subscribers' own rate.** Each subscriber receives 2,000 envelopes/s and
+  about 2.4 arrive during one write. Yielding once before draining, so more could accumulate, gave 2.42-2.48 per write,
+  no CPU change and a worse p99 in two rounds of three; not kept. Fewer syscalls would need a deliberate delay before
+  writing (Nagle's trade), which the latency budget does not want.
+- `wmlhub-loadgen fanout` now prints `batching`: envelopes per websocket message the subscribers received.
+
 ## Next (from the profile)
 
 1. ~~Shard the relay by account, so tenants do not share a lock.~~ Done, above.
 2. ~~Encode a published envelope once and share its bytes across subscribers and backfill.~~ Done, above.
-3. Fixed-size ids instead of `Vec<u8>` keys; bounded-cost eviction for the ring byte budget.
-4. Fewer syscalls per message on the write path.
+3. Bounded-cost eviction for the ring byte budget and the stream limit (`enforce_ring_budget` and `ensure_stream` scan
+   an account's streams). Not visible in `fanout`; needs a scenario that holds an account at its limits.
+4. ~~Fewer syscalls per message on the write path.~~ Measured above: set by delivery rate, not by the hub.
+5. Fixed-size ids: about 2% of samples at 500k deliveries/s. Deferred.

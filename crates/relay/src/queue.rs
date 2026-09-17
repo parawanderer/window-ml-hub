@@ -175,7 +175,6 @@ impl Outbound {
         Ok(())
     }
 
-    #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.items.is_empty()
     }

@@ -84,6 +84,7 @@ fn show(frames: &[Frame]) -> Vec<String> {
 /// Everything queued for `conn`, decoded.
 fn drain(h: &mut Hub, conn: ConnId) -> Vec<Frame> {
     h.take_outbound(conn, usize::MAX)
+        .frames
         .iter()
         .map(|w| wmlhub_proto::decode_frames(w, usize::MAX).unwrap().remove(0))
         .collect()
