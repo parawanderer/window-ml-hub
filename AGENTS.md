@@ -93,6 +93,9 @@ and every result so far: [`docs/perf/README.md`](docs/perf/README.md).
 
 - **`cargo: command not found` in an agent shell.** rustup puts `. "$HOME/.cargo/env"` in the login profile, which a
   non-interactive shell may not read. Prefix the command with `. "$HOME/.cargo/env" &&`.
+- **CI builds fuzz targets with `-D warnings`; a local `cargo fuzz run` does not.** An unused import passes locally
+  and fails the fuzz job. Build them the way CI does before pushing:
+  `cd fuzz && RUSTFLAGS="-D warnings" cargo +nightly fuzz build`.
 - **tungstenite's default read buffer is 128 KiB per connection.** Leaving it cost ~110 KB per idle connection; the
   hub sets 8 KiB (`READ_BUFFER_BYTES`). Any new websocket endpoint must set it too.
 - **Never compare memory with a power-of-two payload.** macOS rounds 16,448 bytes to 20,480; a 16,384-byte payload

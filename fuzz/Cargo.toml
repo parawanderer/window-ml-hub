@@ -13,6 +13,7 @@ cargo-fuzz = true
 [dependencies]
 arbitrary = "1"
 libfuzzer-sys = "0.4"
+wmlhub-box = { path = "../crates/box", features = ["testing"] }
 wmlhub-frame = { path = "../crates/frame" }
 wmlhub-keys = { path = "../crates/keys" }
 wmlhub-proto = { path = "../crates/proto" }
@@ -60,6 +61,13 @@ bench = false
 [[bin]]
 name = "stream"
 path = "fuzz_targets/stream.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "box_frame"
+path = "fuzz_targets/box_frame.rs"
 test = false
 doc = false
 bench = false
