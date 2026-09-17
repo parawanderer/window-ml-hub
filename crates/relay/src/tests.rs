@@ -11,7 +11,7 @@ fn hub() -> Hub {
 }
 
 fn hello(principal: &str, role: Role) -> v1::Hello {
-    v1::Hello { protocol: 1, principal: principal.as_bytes().to_vec(), role: role as i32, account_credential: vec![] }
+    v1::Hello { protocol: 1, principal: principal.as_bytes().to_vec(), role: role as i32, ..Default::default() }
 }
 
 fn acct(name: &str) -> AccountId {

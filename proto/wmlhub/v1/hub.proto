@@ -11,6 +11,8 @@ syntax = "proto3";
 // (wmlhub.v2), negotiated in Hello.
 package wmlhub.v1;
 
+import "wmlhub/v1/identity.proto";
+
 // One unit on the wire. The first Frame a connection sends is Hello; the hub answers Welcome or Error and closes.
 message Frame {
   oneof body {
@@ -25,33 +27,29 @@ message Frame {
     Ping ping = 9;
     Pong pong = 10;
     Error error = 11;
+    // defined in identity.proto
+    Challenge challenge = 12;
   }
 }
 
-// What a connection is, in the hub's routing. It changes nothing a runtime trusts: a runtime decides what to do
-// with a command from its own allowlist of keys, never from a role the hub reports.
-enum Role {
-  ROLE_UNSPECIFIED = 0;
-  // runs sessions and publishes their events (the extension, a desktop daemon)
-  ROLE_RUNTIME = 1;
-  // shows sessions and sends commands (a phone, the chat page, an agent client)
-  ROLE_CLIENT = 2;
-  // relays one box's telemetry
-  ROLE_BOX_CONNECTOR = 3;
-}
-
-// principal -> hub, first frame.
+// principal -> hub, the first frame a principal sends, answering the hub's Challenge.
 message Hello {
   // the newest protocol major this peer speaks; the hub answers with the one it chose, or Error{UNSUPPORTED}
   uint32 protocol = 1;
-  // The principal's id. Until key-based authentication lands (docs/ROADMAP.md step 6) the hub only accepts a
-  // claimed id in development mode, bound to loopback. Afterwards it is derived from a public key the principal
-  // proves it holds.
+  // SHA-256 of the leaf certificate's subject key. (Development mode: any bytes, trusted as claimed.)
   bytes principal = 2;
   Role role = 3;
-  // The account credential for the hub itself (docs/spec RUNTIME_HUB.md §Tenancy: "the hub protects itself").
-  // Opaque to this schema. It decides which account the connection belongs to, for every frame after this one.
+  // Development mode only: the account, as given. Ignored when the hub authenticates.
   bytes account_credential = 4;
+  // the account root's Ed25519 public key; SHA-256 of it is the account id
+  bytes account_root = 5;
+  // leaf first, each issued by the next, the last issued by `account_root`; one or two certificates
+  repeated Certificate chain = 6;
+  // Ed25519 by the leaf key over the hello transcript: "wmlhub/hello/v1" || 0x00 || u32be(len hub) || hub ||
+  // nonce || u32be(len principal) || principal || u32be(role) || account id (crates/keys: hello_transcript)
+  bytes signature = 7;
+  // a hub-operator invite, needed only to register an account the hub does not know, when registration is invite-only
+  bytes invite = 8;
 }
 
 // hub -> principal, answering Hello.
