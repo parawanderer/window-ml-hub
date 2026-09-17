@@ -57,6 +57,9 @@ struct Serve {
     /// Open registration: new accounts in total per hour.
     #[arg(long, env = "WMLHUB_OPEN_TOTAL", default_value_t = OpenLimits::default().total)]
     open_total: u32,
+    /// Independent relay shards, each with its own lock. 0 picks four per core.
+    #[arg(long, env = "WMLHUB_SHARDS", default_value_t = 0)]
+    shards: usize,
     /// Development mode: no authentication, trusts whatever a client claims. Loopback addresses only.
     #[arg(long, env = "WMLHUB_DEV")]
     dev: bool,
@@ -170,7 +173,7 @@ async fn serve(args: Serve) -> ExitCode {
         Err(e) => return fail(&format!("cannot listen on {}: {e}", args.listen)),
     };
     let seed = now_ms() ^ u64::from(std::process::id()).rotate_left(32);
-    let config = wmlhub::Config { auth, ..wmlhub::Config::default() };
+    let config = wmlhub::Config { auth, shards: args.shards, ..wmlhub::Config::default() };
     tokio::select! {
         result = wmlhub::serve(listener, config, seed) => {
             if let Err(e) = result {

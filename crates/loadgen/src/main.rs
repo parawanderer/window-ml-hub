@@ -40,6 +40,10 @@ struct Cli {
     hub_bin: PathBuf,
     #[arg(long, default_value = "127.0.0.1:18787")]
     listen: String,
+    /// Environment for the hub, `KEY=VALUE`, repeatable (`--hub-env WMLHUB_SHARDS=1`). Environment rather than flags,
+    /// so an older hub binary given a setting it does not know still starts.
+    #[arg(long = "hub-env", value_parser = parse_env)]
+    hub_env: Vec<(String, String)>,
     #[command(subcommand)]
     scenario: Scenario,
 }
@@ -67,6 +71,10 @@ enum Scenario {
         /// messages batched into one websocket message by each publisher
         #[arg(long, default_value_t = 1)]
         batch: usize,
+        /// Extra accounts that publish as fast as the hub reads, in batches of 256, with one subscriber each. They are
+        /// left out of every latency figure: what they do to the other accounts is the measurement.
+        #[arg(long, default_value_t = 0)]
+        flooders: usize,
     },
     /// Idle connections, for memory per connection.
     Idle {
@@ -80,6 +88,7 @@ async fn main() {
     let cli = Cli::parse();
     let mut hub = tokio::process::Command::new(&cli.hub_bin)
         .args(["serve", "--dev", "--listen", &cli.listen])
+        .envs(cli.hub_env.iter().map(|(k, v)| (k, v)))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true)
@@ -92,12 +101,17 @@ async fn main() {
     println!("hub pid {pid}, baseline rss {} KiB", baseline.rss_kib);
 
     match cli.scenario {
-        Scenario::Fanout { accounts, subscribers, channels, rate, payload, seconds, batch } => {
-            fanout(&url, pid, baseline, accounts, subscribers, channels, rate, payload, seconds, batch).await;
+        Scenario::Fanout { accounts, subscribers, channels, rate, payload, seconds, batch, flooders } => {
+            let shape = Shape { accounts, subscribers, channels, rate, payload, seconds, batch, flooders };
+            fanout(&url, pid, baseline, shape).await;
         }
         Scenario::Idle { connections } => idle(&url, pid, baseline, connections).await,
     }
     let _ = hub.kill().await;
+}
+
+fn parse_env(s: &str) -> Result<(String, String), String> {
+    s.split_once('=').map(|(k, v)| (k.to_owned(), v.to_owned())).ok_or_else(|| format!("expected KEY=VALUE: {s}"))
 }
 
 async fn wait_for_hub(addr: &str) {
@@ -163,11 +177,7 @@ async fn wait_for(ws: &mut Ws, pred: impl Fn(&Body) -> bool) {
     panic!("connection closed while waiting");
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn fanout(
-    url: &str,
-    pid: u32,
-    baseline: Sample,
+struct Shape {
     accounts: usize,
     subscribers: usize,
     channels: usize,
@@ -175,14 +185,61 @@ async fn fanout(
     payload: usize,
     seconds: u64,
     batch: usize,
-) {
+    flooders: usize,
+}
+
+/// One flooding account: a runtime publishing batches as fast as its socket takes them until `stop`, and one subscriber
+/// reading everything. Returns envelopes sent.
+async fn flood(url: String, n: usize, payload: usize, ready: Arc<Barrier>, stop: Duration) -> u64 {
+    const BATCH: usize = 256;
+    let account = format!("flood{n}");
+    let mut sub = connect(&url, &account, "client", Role::Client).await;
+    let frame = Frame {
+        body: Some(Body::Subscribe(v1::Subscribe {
+            stream: Some(v1::StreamRef { publisher: b"runtime".to_vec(), channel: b"f".to_vec() }),
+            since: None,
+        })),
+    };
+    sub.send(Message::binary(encode_frames(&[frame], MAX).unwrap())).await.unwrap();
+    wait_for(&mut sub, |b| matches!(b, Body::Backfilled(_))).await;
+    let mut ws = connect(&url, &account, "runtime", Role::Runtime).await;
+    let deadline = tokio::time::Instant::now() + stop;
+    let reader = tokio::spawn(async move {
+        while let Ok(Some(Ok(_))) = tokio::time::timeout_at(deadline + Duration::from_secs(2), sub.next()).await {}
+    });
+    let env = Frame {
+        body: Some(Body::Envelope(Envelope {
+            to: Some(To::Channel(b"f".to_vec())),
+            kind: Kind::SessionEvents as i32,
+            payload: vec![3u8; payload].into(),
+            ..Default::default()
+        })),
+    };
+    let message = encode_frames(&vec![env; BATCH], MAX).unwrap();
+    ready.wait().await;
+    let mut sent = 0u64;
+    while tokio::time::Instant::now() < deadline {
+        if ws.send(Message::binary(message.clone())).await.is_err() {
+            break;
+        }
+        sent += BATCH as u64;
+    }
+    reader.abort();
+    sent
+}
+
+async fn fanout(url: &str, pid: u32, baseline: Sample, shape: Shape) {
+    let Shape { accounts, subscribers, channels, rate, payload, seconds, batch, flooders } = shape;
     let epoch = Instant::now();
     let delivered = Arc::new(AtomicU64::new(0));
     // websocket messages the subscribers received: the hub feeds one per batch it takes and flushes once per wake-up,
     // so envelopes per message is roughly how many deliveries share a write
     let messages = Arc::new(AtomicU64::new(0));
     let (hist_tx, mut hist_rx) = mpsc::unbounded_channel::<(Histogram<u64>, Histogram<u64>)>();
-    let ready = Arc::new(Barrier::new(accounts * subscribers + 1));
+    let ready = Arc::new(Barrier::new(accounts * subscribers + flooders + 1));
+    let flooding: Vec<_> = (0..flooders)
+        .map(|n| tokio::spawn(flood(url.to_owned(), n, payload, ready.clone(), Duration::from_secs(seconds))))
+        .collect();
     let stop_at = Duration::from_secs(seconds + 2);
 
     for a in 0..accounts {
@@ -296,6 +353,10 @@ async fn fanout(
         sockets.push(p.await.unwrap());
     }
     let publish_elapsed = started.elapsed();
+    let mut flooded = Vec::new();
+    for f in flooding {
+        flooded.push(f.await.unwrap());
+    }
     tokio::time::sleep(Duration::from_secs(2)).await;
     let after = sample(pid);
 
@@ -322,6 +383,11 @@ async fn fanout(
         sent.load(Ordering::Relaxed),
         subscribers
     );
+    if flooders > 0 {
+        let per: Vec<String> =
+            flooded.iter().map(|n| format!("{:.0}", *n as f64 / publish_elapsed.as_secs_f64())).collect();
+        println!("  flooders  {flooders} accounts, envelopes/s each: {} (not in any figure below)", per.join(", "));
+    }
     println!("  delivered {got} of {expected} ({:.2}%)", 100.0 * got as f64 / expected.max(1) as f64);
     println!(
         "  batching  {:.2} envelopes per websocket message received",
