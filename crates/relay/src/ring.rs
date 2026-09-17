@@ -74,6 +74,27 @@ impl Ring {
     pub(crate) fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Internal consistency, for the model checker: bytes agree with the entries, seqs strictly increase and end at
+    /// or before `seq`, every entry carries this ring's epoch and kind, and the capacity holds.
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) fn check(&self, capacity: usize) -> Result<(), String> {
+        let bytes: usize = self.entries.iter().map(|e| e.payload.len()).sum();
+        if bytes != self.bytes {
+            return Err(format!("ring bytes drifted: {} vs {bytes}", self.bytes));
+        }
+        if self.entries.len() > capacity {
+            return Err(format!("ring over capacity: {} > {capacity}", self.entries.len()));
+        }
+        let mut last = 0;
+        for e in &self.entries {
+            if e.seq <= last || e.seq > self.seq || e.epoch != self.epoch || e.kind != self.kind as i32 {
+                return Err(format!("ring entry out of order or mislabelled: seq {} after {last}", e.seq));
+            }
+            last = e.seq;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

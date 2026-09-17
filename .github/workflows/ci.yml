@@ -45,6 +45,34 @@ jobs:
       - name: Vendored schemas match their pins
         run: tools/check-pins.sh
 
+  # Coverage-guided fuzzing, 30 s per target on every push (docs/FUZZING.md). A crash is uploaded as an artifact.
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Nightly toolchain
+        run: rustup toolchain install nightly --profile minimal
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - name: Fuzz every target
+        working-directory: fuzz
+        run: |
+          for target in $(cargo +nightly fuzz list); do
+            echo "::group::$target"
+            cargo +nightly fuzz run "$target" -- -max_total_time=30
+            echo "::endgroup::"
+          done
+      - name: Upload crashes
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+
   # The image a self-hoster builds: it must build, create an invite, and serve with the compose defaults.
   docker:
     runs-on: ubuntu-latest

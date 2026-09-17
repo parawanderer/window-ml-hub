@@ -64,6 +64,7 @@ Which repository owns which wire schema, and how the others pin it: [`docs/SCHEM
 | `crates/relay` | the routing core with no IO: accounts, presence, streams and rings, backpressure, limits |
 | `proto/` | the hub's wire schema (rules in [`docs/PROTOCOL.md`](docs/PROTOCOL.md)); `proto/vendor/` holds pinned copies of other repos' schemas |
 | `crates/loadgen` | `wmlhub-loadgen`: throughput, latency percentiles, CPU per delivery, memory per connection ([docs/perf](docs/perf/README.md)) |
+| `fuzz/` | coverage-guided fuzz targets: the relay model checker, frame decoding, streaming reads, certificate chains ([docs/FUZZING.md](docs/FUZZING.md)) |
 | `tools/mv3-ws-probe` | the probe that showed a websocket keeps an MV3 service worker alive |
 | `tools/webcrypto-probe` | the probe listing which WebCrypto primitives an MV3 service worker has |
 | `docs/` | roadmap, protocol, schema ownership, design proposals, findings |

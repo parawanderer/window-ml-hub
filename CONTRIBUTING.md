@@ -55,7 +55,8 @@ cargo doc --workspace --no-deps                           # doc comments must bu
 ```
 
 CI also builds and tests on the minimum supported Rust version (`rust-version` in `Cargo.toml`), so a feature newer
-than that fails there even when it passes locally.
+than that fails there even when it passes locally. It fuzzes every target for 30 seconds (`fuzz/`, nightly;
+[docs/FUZZING.md](docs/FUZZING.md) has how to run it locally) and builds the Docker image.
 
 ## Updating the toolchain
 

@@ -2,9 +2,13 @@
 //!
 //! - Session events and direct envelopes are never dropped. Past their bound the connection is a slow consumer and
 //!   is closed; it resubscribes from its position.
-//! - Telemetry is coalesced: a queued envelope on the same stream with the same non-empty `coalesce` is replaced.
+//! - Telemetry is coalesced: a queued envelope on the same stream with the same non-empty `coalesce` is superseded.
 //!   Past its bound the oldest telemetry is dropped, counted per stream, and a `Gap` goes out before that stream's
 //!   next delivered envelope.
+//! - Every published stream is delivered in `seq` order. Coalescing removes the superseded envelope and appends the
+//!   new one (replacing it in place put a newer seq ahead of an older one), and a repeated `Subscribe` purges what is
+//!   queued for the stream before its backfill (otherwise both arrive). The model checker's order invariant found
+//!   both.
 
 use std::collections::{HashMap, VecDeque};
 
@@ -21,8 +25,9 @@ pub struct SlowConsumer;
 struct Item {
     frame: Frame,
     bytes: usize,
-    /// set for telemetry: which stream, for coalescing, drops and gaps
-    telemetry: Option<StreamKey>,
+    /// set for a published envelope of either kind: the stream it belongs to
+    stream: Option<StreamKey>,
+    telemetry: bool,
     session_event: bool,
 }
 
@@ -46,7 +51,7 @@ impl Outbound {
     /// Queue a control frame or a direct envelope: never dropped.
     pub(crate) fn push_frame(&mut self, frame: Frame, limits: &Limits) -> Result<(), SlowConsumer> {
         let bytes = encoded_len(&frame);
-        self.push(Item { frame, bytes, telemetry: None, session_event: false }, limits)
+        self.push(Item { frame, bytes, stream: None, telemetry: false, session_event: false }, limits)
     }
 
     /// Queue a published envelope of `key`'s stream, applying the policy of its kind.
@@ -59,22 +64,40 @@ impl Outbound {
         let kind = env.kind();
         let frame = Frame { body: Some(Body::Envelope(env)) };
         let bytes = encoded_len(&frame);
-        if kind != Kind::Telemetry {
-            return self
-                .push(Item { frame, bytes, telemetry: None, session_event: kind == Kind::SessionEvents }, limits);
+        let telemetry = kind == Kind::Telemetry;
+        let item =
+            Item { frame, bytes, stream: Some(key.clone()), telemetry, session_event: kind == Kind::SessionEvents };
+        if !telemetry {
+            return self.push(item, limits);
         }
-        if let Some(i) = self.coalesce_target(key, &frame) {
-            let old = std::mem::replace(
-                &mut self.items[i],
-                Item { frame, bytes, telemetry: Some(key.clone()), session_event: false },
-            );
-            self.bytes = self.bytes - old.bytes + bytes;
-            return self.check_bytes(limits);
+        if let Some(i) = self.coalesce_target(key, &item.frame) {
+            let old = self.items.remove(i).expect("position is in range");
+            self.bytes -= old.bytes;
+            self.telemetry -= 1;
         }
         while self.telemetry >= limits.queue_telemetry.max(1) {
             self.drop_oldest_telemetry();
         }
-        self.push(Item { frame, bytes, telemetry: Some(key.clone()), session_event: false }, limits)
+        self.push(item, limits)
+    }
+
+    /// Remove everything queued for `key`'s stream and forget its unreported drops: the subscription is being
+    /// replaced (a repeated `Subscribe`, whose backfill resends what the ring holds) or ended (`Unsubscribe`).
+    pub(crate) fn purge_stream(&mut self, key: &StreamKey) {
+        let (mut bytes, mut session, mut telemetry) = (0, 0, 0);
+        self.items.retain(|it| {
+            let keep = it.stream.as_ref() != Some(key);
+            if !keep {
+                bytes += it.bytes;
+                session += usize::from(it.session_event);
+                telemetry += usize::from(it.telemetry);
+            }
+            keep
+        });
+        self.bytes -= bytes;
+        self.session_events -= session;
+        self.telemetry -= telemetry;
+        self.dropped.remove(key);
     }
 
     /// Take queued frames, oldest first, up to about `budget` bytes (always at least one frame when any is queued).
@@ -88,11 +111,10 @@ impl Outbound {
             }
             let item = self.items.pop_front().expect("front exists");
             self.bytes -= item.bytes;
-            if item.session_event {
-                self.session_events -= 1;
-            }
-            if let Some(key) = &item.telemetry {
+            self.session_events -= usize::from(item.session_event);
+            if item.telemetry {
                 self.telemetry -= 1;
+                let key = item.stream.as_ref().expect("a telemetry item belongs to a stream");
                 if let Some(d) = self.dropped.remove(key) {
                     let resume_seq = match &item.frame.body {
                         Some(Body::Envelope(e)) => e.seq,
@@ -114,6 +136,30 @@ impl Outbound {
         out
     }
 
+    /// Internal consistency, for the model checker: the counters agree with the items, and the bounds hold.
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) fn check(&self, limits: &Limits) -> Result<(), String> {
+        let bytes: usize = self.items.iter().map(|i| i.bytes).sum();
+        let session = self.items.iter().filter(|i| i.session_event).count();
+        let telemetry = self.items.iter().filter(|i| i.telemetry).count();
+        if bytes != self.bytes || session != self.session_events || telemetry != self.telemetry {
+            return Err(format!(
+                "queue counters drifted: bytes {} vs {bytes}, session {} vs {session}, telemetry {} vs {telemetry}",
+                self.bytes, self.session_events, self.telemetry
+            ));
+        }
+        if self.bytes > limits.queue_bytes
+            || self.session_events > limits.queue_session_events
+            || self.telemetry > limits.queue_telemetry.max(1)
+        {
+            return Err(format!(
+                "queue over its bounds: {} bytes, {session} session, {telemetry} telemetry",
+                self.bytes
+            ));
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.items.is_empty()
@@ -131,9 +177,7 @@ impl Outbound {
             }
             self.session_events += 1;
         }
-        if item.telemetry.is_some() {
-            self.telemetry += 1;
-        }
+        self.telemetry += usize::from(item.telemetry);
         self.bytes += item.bytes;
         self.items.push_back(item);
         self.check_bytes(limits)
@@ -149,17 +193,18 @@ impl Outbound {
             return None;
         }
         self.items.iter().position(|it| {
-            it.telemetry.as_ref() == Some(key)
+            it.telemetry
+                && it.stream.as_ref() == Some(key)
                 && matches!(&it.frame.body, Some(Body::Envelope(old)) if old.coalesce == new.coalesce)
         })
     }
 
     fn drop_oldest_telemetry(&mut self) {
-        let Some(i) = self.items.iter().position(|it| it.telemetry.is_some()) else { return };
+        let Some(i) = self.items.iter().position(|it| it.telemetry) else { return };
         let item = self.items.remove(i).expect("position is in range");
         self.bytes -= item.bytes;
         self.telemetry -= 1;
-        let key = item.telemetry.expect("telemetry item");
+        let key = item.stream.expect("a telemetry item belongs to a stream");
         let epoch = match &item.frame.body {
             Some(Body::Envelope(e)) => e.epoch,
             _ => 0,
@@ -206,13 +251,31 @@ mod tests {
     }
 
     #[test]
-    fn telemetry_with_the_same_coalesce_key_replaces_in_place() {
+    fn telemetry_with_the_same_coalesce_key_supersedes_and_order_is_kept() {
         let limits = Limits::default();
         let mut q = Outbound::default();
         q.push_published(&key(b"box"), env(Kind::Telemetry, 1, b"sample"), &limits).unwrap();
         q.push_published(&key(b"box"), env(Kind::Telemetry, 2, b"info"), &limits).unwrap();
         q.push_published(&key(b"box"), env(Kind::Telemetry, 3, b"sample"), &limits).unwrap();
-        assert_eq!(seqs(&q.take(usize::MAX)), ["e3", "e2"]);
+        // seq 1 is superseded; 2 still goes before 3 (replacing in place delivered 3 then 2)
+        assert_eq!(seqs(&q.take(usize::MAX)), ["e2", "e3"]);
+        q.check(&limits).unwrap();
+    }
+
+    #[test]
+    fn purging_a_stream_removes_only_its_items_and_keeps_the_counters_true() {
+        let limits = Limits { queue_telemetry: 1, ..Limits::default() };
+        let mut q = Outbound::default();
+        q.push_published(&key(b"a"), env(Kind::SessionEvents, 1, b""), &limits).unwrap();
+        q.push_published(&key(b"b"), env(Kind::SessionEvents, 1, b""), &limits).unwrap();
+        q.push_published(&key(b"a"), env(Kind::Telemetry, 2, b""), &limits).unwrap();
+        q.push_published(&key(b"a"), env(Kind::Telemetry, 3, b""), &limits).unwrap(); // drops 2: a Gap is owed on a
+        q.push_frame(Frame { body: Some(Body::Ping(v1::Ping { nonce: 1 })) }, &limits).unwrap();
+        q.purge_stream(&key(b"a"));
+        q.check(&limits).unwrap();
+        let left = q.take(usize::MAX);
+        assert_eq!(left.len(), 2, "b's envelope and the ping remain");
+        assert!(left.iter().all(|f| !matches!(f.body, Some(Body::Gap(_)))), "no Gap for a purged stream");
     }
 
     #[test]

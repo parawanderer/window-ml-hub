@@ -53,6 +53,13 @@ hierarchy looks.
   Profile before deciding where time goes.
 - **Dependencies are liabilities**: few, well known, justified in the PR.
 
+**RULE: adversarial tests are part of the change, without being asked.** Anything that parses bytes from a peer gets
+a fuzz target in `fuzz/` (never panics; round trips where a round trip exists). Anything with state gets its
+operations into a model checker that asserts its invariants after every step (the relay's is `model.rs`: add new
+operations to `Op` and new invariants to `check`). Every security or safety check is mutation-checked: break it on
+purpose and see a test fail for that reason; a test that still passes is rewritten. A checker that has never been seen
+to fail is not evidence. How: [`docs/FUZZING.md`](docs/FUZZING.md).
+
 ## Schemas
 
 Each wire schema lives beside its encoder and is pinned by commit and git blob everywhere else:
