@@ -1,0 +1,18 @@
+# The simplest way to run a hub. Copy .env.example to .env, set WMLHUB_HUB_NAME, then:
+#   docker compose up -d
+#   docker compose exec hub wmlhub invite create
+# The port is published on 127.0.0.1 only: put TLS in front of it (Tailscale or Caddy, docs/SELF_HOSTING.md).
+services:
+  hub:
+    build: .
+    restart: unless-stopped
+    environment:
+      WMLHUB_HUB_NAME: ${WMLHUB_HUB_NAME:?set WMLHUB_HUB_NAME in .env}
+      WMLHUB_REGISTRATION: ${WMLHUB_REGISTRATION:-invite}
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - wmlhub-data:/data
+
+volumes:
+  wmlhub-data:

@@ -45,6 +45,34 @@ jobs:
       - name: Vendored schemas match their pins
         run: tools/check-pins.sh
 
+  # The image a self-hoster builds: it must build, create an invite, and serve with the compose defaults.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the image
+        run: docker build -t wmlhub:ci .
+      - name: Refuses to serve without a hub name
+        run: |
+          if docker run --rm wmlhub:ci; then echo "served without WMLHUB_HUB_NAME"; exit 1; fi
+      - name: Creates an invite in the data volume
+        run: |
+          docker volume create wmlhub-ci
+          docker run --rm -v wmlhub-ci:/data wmlhub:ci invite create | grep -E '^wmlhub-invite-[0-9a-f]{40}$'
+          docker run --rm -v wmlhub-ci:/data wmlhub:ci invite list | grep valid
+      - name: Serves, and accepts a websocket upgrade
+        run: |
+          docker run -d --name hub -p 127.0.0.1:8787:8787 -v wmlhub-ci:/data -e WMLHUB_HUB_NAME=ci.test wmlhub:ci
+          for i in $(seq 1 30); do docker logs hub 2>&1 | grep -q serving && break; sleep 1; done
+          docker logs hub
+          code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+            -H 'Connection: Upgrade' -H 'Upgrade: websocket' -H 'Sec-WebSocket-Version: 13' \
+            -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' http://127.0.0.1:8787/ || true)
+          echo "upgrade answered $code"
+          test "$code" = "101"
+      - name: Compose file validates
+        run: WMLHUB_HUB_NAME=ci.test docker compose config -q && (cd deploy/caddy && WMLHUB_HUB_NAME=ci.test docker compose config -q)
+
   # The minimum supported Rust version in Cargo.toml is a claim; this is what checks it.
   msrv:
     runs-on: ubuntu-latest

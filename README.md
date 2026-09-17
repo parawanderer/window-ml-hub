@@ -69,6 +69,11 @@ Which repository owns which wire schema, and how the others pin it: [`docs/SCHEM
 
 ## Running it
 
+**With Docker** (no Rust needed): [`docs/SELF_HOSTING.md`](docs/SELF_HOSTING.md), which covers Tailscale, a public
+host with automatic HTTPS, invites and backups.
+
+**From source**:
+
 ```bash
 cargo run -p wmlhub -- invite create                      # prints a single-use invite token
 cargo run -p wmlhub -- serve --hub-name hub.example.com    # ws://127.0.0.1:8787, invite-only registration
