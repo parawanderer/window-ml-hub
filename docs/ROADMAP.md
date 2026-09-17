@@ -15,8 +15,8 @@ In order. Each step lands as its own PR with CI green. Design questions are answ
    and per-account limits. Payloads are opaque bytes from the first commit, so nothing has to be taken out later.
 5. **Accounts: the hub protects itself.** Decided ([design/end-to-end-crypto.md](design/end-to-end-crypto.md)): an
    account is a root key, devices hold certificates, the hub verifies signatures; registration `invite` (default) or
-   `open`. Identities and chains: `crates/keys`. Next: the authenticated `Hello`, the registration modes and an invite
-   command.
+   `open`. Identities and chains: `crates/keys`. Authenticated handshake, both registration modes and
+   `wmlhub invite`: `crates/hub`. Next: Docker and a self-hosting guide.
 6. **End-to-end encryption.** Decided: HPKE-style boxes on WebCrypto
    ([finding](findings/webcrypto-in-mv3-worker.md)), stream keys wrapped per device, one signature per published
    envelope, signed commands with nonces and a clock window. Lives in the clients: a Rust client library here, the

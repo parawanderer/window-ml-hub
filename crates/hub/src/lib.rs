@@ -4,8 +4,11 @@
 //! connections, the `Hello` handshake, decoding and encoding frames, one writer task per connection draining its
 //! queue, pings, and timeouts. It never looks inside `Envelope.payload`, and logs no frame contents.
 
+pub mod registry;
+
 use std::collections::HashMap;
 use std::io;
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -18,9 +21,27 @@ use wmlhub_proto::v1::{self, Frame, error::Code, frame::Body};
 use wmlhub_proto::{decode_frames, encode_frames};
 use wmlhub_relay::{AccountId, Action, ConnId, Hub, Limits};
 
+use registry::{Refusal, Registry};
+
+/// How a `Hello` is authenticated.
+#[derive(Debug, Clone)]
+pub enum Auth {
+    /// Development only: trusts the principal a hello claims and takes `account_credential` as the account. The
+    /// binary allows this only on a loopback address.
+    Development,
+    /// Certificate chains and a signed challenge (docs/design/end-to-end-crypto.md), with accounts admitted by the
+    /// registry.
+    Keys {
+        /// The name clients expect this hub to have; it goes in every challenge and every signed transcript.
+        hub_name: String,
+        registry: Arc<Registry>,
+    },
+}
+
 /// How the server behaves around the relay.
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub auth: Auth,
     pub limits: Limits,
     /// How long a new socket may take to send its `Hello`.
     pub hello_timeout: Duration,
@@ -37,6 +58,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            auth: Auth::Development,
             limits: Limits::default(),
             hello_timeout: Duration::from_secs(10),
             ping_interval: Duration::from_secs(20),
@@ -107,13 +129,13 @@ pub async fn serve(listener: TcpListener, config: Config, epoch_seed: u64) -> io
         };
         let shared = shared.clone();
         tokio::spawn(async move {
-            connection(shared, tcp).await;
+            connection(shared, tcp, peer.ip()).await;
             drop(permit);
         });
     }
 }
 
-async fn connection(shared: Arc<Shared>, tcp: TcpStream) {
+async fn connection(shared: Arc<Shared>, tcp: TcpStream, address: IpAddr) {
     let limits = &shared.config.limits;
     let max_message = limits.max_frame_bytes.saturating_mul(4);
     let ws_config = WebSocketConfig::default().max_message_size(Some(max_message)).max_frame_size(Some(max_message));
@@ -121,7 +143,19 @@ async fn connection(shared: Arc<Shared>, tcp: TcpStream) {
     let (mut sink, mut stream) = ws.split();
     let max_frame = limits.max_frame_bytes;
 
-    // --- Hello ---
+    // --- Challenge, then Hello ---
+    let mut nonce = [0u8; 32];
+    if getrandom::fill(&mut nonce).is_err() {
+        return;
+    }
+    let hub_name = match &shared.config.auth {
+        Auth::Keys { hub_name, .. } => hub_name.clone(),
+        Auth::Development => String::new(),
+    };
+    let challenge = v1::Challenge { nonce: nonce.to_vec(), hub: hub_name, server_time_ms: now_ms() };
+    if send(&mut sink, &[Frame { body: Some(Body::Challenge(challenge)) }], max_frame).await.is_err() {
+        return;
+    }
     let first = tokio::time::timeout(shared.config.hello_timeout, stream.next()).await;
     let Ok(Some(Ok(Message::Binary(bytes)))) = first else { return };
     let mut frames = match decode_frames(&bytes, max_frame) {
@@ -135,7 +169,7 @@ async fn connection(shared: Arc<Shared>, tcp: TcpStream) {
         let _ = send(&mut sink, &[error_frame(Code::Invalid, "the first frame must be hello")], max_frame).await;
         return;
     };
-    let account = match dev_account(&hello) {
+    let account = match authenticate(&shared.config.auth, &hello, &nonce, address) {
         Ok(a) => a,
         Err(frame) => {
             let _ = send(&mut sink, &[*frame], max_frame).await;
@@ -258,11 +292,54 @@ async fn send(sink: &mut Sink, frames: &[Frame], max_frame: usize) -> Result<(),
     sink.send(Message::binary(bytes)).await.map_err(|_| ())
 }
 
-/// Development mode only: the account is the credential bytes as given, and the principal is whatever `Hello`
-/// claims. The binary refuses to run this way on anything but loopback.
-fn dev_account(hello: &v1::Hello) -> Result<AccountId, Box<Frame>> {
-    if hello.account_credential.is_empty() {
-        return Err(Box::new(error_frame(Code::Unauthenticated, "an account credential is required")));
+/// Decide which account a hello belongs to, or refuse it. Verification happens here, before the relay is touched.
+fn authenticate(auth: &Auth, hello: &v1::Hello, nonce: &[u8; 32], address: IpAddr) -> Result<AccountId, Box<Frame>> {
+    let refuse = |code: Code, message: &str| Box::new(error_frame(code, message));
+    match auth {
+        Auth::Development => {
+            if hello.account_credential.is_empty() {
+                return Err(refuse(Code::Unauthenticated, "an account credential is required"));
+            }
+            Ok(AccountId(hello.account_credential.clone()))
+        }
+        Auth::Keys { hub_name, registry } => {
+            // One message for every verification failure: which check failed is for the server's log, not for
+            // whoever is probing it.
+            const BAD: &str = "hello did not verify";
+            let now = now_ms();
+            let root: wmlhub_keys::PublicKey =
+                hello.account_root.as_slice().try_into().map_err(|_| refuse(Code::Unauthenticated, BAD))?;
+            let verified = wmlhub_keys::verify_chain(&root, &hello.chain, now).map_err(|e| {
+                tracing::info!(%address, reason = ?e, "certificate chain refused");
+                refuse(Code::Unauthenticated, BAD)
+            })?;
+            if hello.principal != verified.principal || hello.role != verified.leaf.role {
+                tracing::info!(%address, "hello names a principal or role its certificate does not");
+                return Err(refuse(Code::Unauthenticated, BAD));
+            }
+            let transcript =
+                wmlhub_keys::hello_transcript(hub_name, nonce, &hello.principal, hello.role(), &verified.account);
+            if wmlhub_keys::verify_hello(&verified.leaf_key, &transcript, &hello.signature).is_err() {
+                tracing::info!(%address, "hello signature refused");
+                return Err(refuse(Code::Unauthenticated, BAD));
+            }
+            match registry.admit(&verified.account, &hello.invite, address, now) {
+                Ok(admission) => {
+                    if admission == registry::Admission::Registered {
+                        tracing::info!(account = %wmlhub_keys::hex(&verified.account[..6]), "account registered");
+                    }
+                    Ok(AccountId(verified.account.to_vec()))
+                }
+                Err(Refusal::InviteRequired) => {
+                    Err(refuse(Code::Unauthenticated, "this hub needs an invite to register an account"))
+                }
+                Err(Refusal::InviteInvalid) => Err(refuse(Code::Unauthenticated, "invite not valid")),
+                Err(Refusal::RateLimited) => Err(refuse(Code::Limit, "too many new accounts; try later")),
+                Err(Refusal::Storage(e)) => {
+                    tracing::error!(error = %e, "registry storage failed");
+                    Err(refuse(Code::Unavailable, "hub storage error"))
+                }
+            }
+        }
     }
-    Ok(AccountId(hello.account_credential.clone()))
 }

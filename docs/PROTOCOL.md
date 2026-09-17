@@ -112,14 +112,19 @@ contract's `epoch`/`cursor`, inside the ciphertext, are the runtime's own and su
   runtime at least that often.
 - An unknown frame body decodes as no body and is answered `Error{UNSUPPORTED}`; an unknown field is ignored.
 
-## Development mode
+## Registration and development mode
 
-Until account credentials and key authentication land (docs/ROADMAP.md steps 5 and 6), the hub runs only in an
-explicit development mode: it binds to loopback, accepts the principal id a `Hello` claims, and derives the account
-from the credential bytes as given. It refuses to start that way on any other address.
+- **Registration** decides whether an account the hub does not know may connect: `invite` (the default) needs a
+  single-use operator invite in `Hello.invite`, `open` admits any valid chain, rate limited per source address and
+  overall. A known account never needs an invite and is never rate limited. Refusals are `UNAUTHENTICATED` (no or bad
+  invite) and `LIMIT` (rate).
+- **Every verification failure answers the same message**, "hello did not verify", so a prober learns nothing about
+  which check failed; the reason goes to the hub's log.
+- **Development mode** (`wmlhub serve --dev`) skips all of it: it trusts the principal a `Hello` claims and takes
+  `account_credential` as the account. It still sends a `Challenge`. The binary refuses to run it on anything but a
+  loopback address.
 
 ## Open
 
 - Padding payloads to size buckets for `SESSION_EVENTS` (the spec forbids compressing them, and sizes still leak).
 - Whether `Presence` should carry anything beyond online state (last seen, a connection count).
-- Authentication in `Hello`: a challenge the principal signs, once keys exist.
