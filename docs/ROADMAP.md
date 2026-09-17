@@ -22,8 +22,9 @@ In order. Each step lands as its own PR with CI green. Design questions are answ
    envelope, signed commands with nonces and a clock window. Lives in the clients: a Rust client library here, the
    extension's connector in window-ml. Commands and results, published streams (stream keys,
    wrapping, signed batches) and keyed channel names: `crates/seal`. The Rust client, with end-to-end tests that drive
-   a real hub: `crates/client`. Vectors for a second implementation: `vectors/seal-v1.json`
-   ([VECTORS.md](VECTORS.md)); the extension's own vectors come back the other way when its connector is built.
+   a real hub: `crates/client`. Vectors both ways: `vectors/seal-v1.json` opened by
+   window-ml's TypeScript implementation, and `vectors/seal-ts-v1.json`, sealed there and opened here
+   ([VECTORS.md](VECTORS.md)).
 7. **The box connector mode.** Schema vendored ([SCHEMAS.md](SCHEMAS.md)); relay rules in
    [design/box-connector.md](design/box-connector.md). Routing a frame by its tags, without decoding it:
    `crates/box`. Next: the connector itself, reading `/api/events` and publishing on the two channels.
