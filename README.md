@@ -59,10 +59,22 @@ Which repository owns which wire schema, and how the others pin it: [`docs/SCHEM
 | --- | --- |
 | `crates/frame` | varint-delimited framing, byte-compatible with window-ml's `src/protostream.ts` |
 | `crates/proto` | the wire types generated from `proto/wmlhub/v1/hub.proto` (no `protoc` needed) |
+| `crates/hub` | the `wmlhub` binary: the websocket server around the relay |
 | `crates/relay` | the routing core with no IO: accounts, presence, streams and rings, backpressure, limits |
 | `proto/` | the hub's wire schema; rules in [`docs/PROTOCOL.md`](docs/PROTOCOL.md) |
 | `tools/mv3-ws-probe` | the probe that showed a websocket keeps an MV3 service worker alive |
 | `docs/` | roadmap, schema ownership, findings |
+
+## Running it
+
+```bash
+cargo run -p wmlhub -- --dev                          # ws://127.0.0.1:8787
+cargo run -p wmlhub -- --dev --listen 127.0.0.1:9000
+```
+
+There is no authentication yet, so the server starts only with `--dev` and only on a loopback address: it trusts the
+principal each `Hello` claims and takes the account credential bytes as the account. Anything else is refused at
+startup. See [`docs/PROTOCOL.md`](docs/PROTOCOL.md) §Development mode.
 
 ## Building
 

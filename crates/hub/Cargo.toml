@@ -1,0 +1,25 @@
+[package]
+name = "wmlhub"
+version = "0.1.0"
+description = "The window.ml hub: a websocket relay that reads envelopes and forwards ciphertext"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "sync", "time", "signal"] }
+tokio-tungstenite = "0.30"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi"] }
+wmlhub-proto = { path = "../proto" }
+wmlhub-relay = { path = "../relay" }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+wmlhub-relay = { path = "../relay" }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "time"] }
