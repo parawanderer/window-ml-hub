@@ -164,11 +164,35 @@ outstanding. Before is `main` at `434c3c1`; three rounds each at the load above.
   writing (Nagle's trade), which the latency budget does not want.
 - `wmlhub-loadgen fanout` now prints `batching`: envelopes per websocket message the subscribers received.
 
+### Eviction at the limits
+
+`ensure_stream` scans an account's streams for the least recently published idle one when a new stream would pass
+`max_streams_per_account`; `enforce_ring_budget` scans them for the largest ring once per entry it evicts. Both are
+linear in a named constant (1,024 streams), and a publish evicts at most one ring's entries (512) before the ring it
+landed in is the largest no more. Measured directly on the relay, no sockets, three rounds (`cargo test --release -p
+wmlhub-relay eviction_costs -- --ignored --nocapture`), per publish:
+
+| scenario | worst | mean |
+| --- | --- | --- |
+| small publish into an account at its 64 MiB ring budget (the baseline) | 14-36 us | 2.4-2.9 us |
+| new stream at the stream limit, each victim holding a full ring | 1.6-2.0 ms | 25-30 us |
+| new stream at the stream limit, steady state | 0.22-1.3 ms | 8.1-9.7 us |
+| adversarial: refill one ring with 512 small entries, then a 1 MiB payload into it, repeated | 0.87-1.1 ms | 2.3-2.8 us |
+
+- **Amortized, eviction costs nothing extra.** The expensive publish (about 1 ms, evicting one ring's worth under the
+  shard lock) has to be paid for with 512 cheap ones first, and the loop averages what a plain publish does.
+- **The one lasting cost is 3-4x a plain publish**, for an account that creates a new stream on every publish while
+  at its stream limit. An ordered index by last publish would remove the scan and add bookkeeping to every publish of
+  every account. Not done.
+- **What is actually unbounded is rate.** Nothing limits how fast an account publishes, so one account at full speed
+  takes its shard's lock from the others on it whether or not it evicts anything. That is fairness, recorded in
+  `docs/ROADMAP.md`, not an eviction question.
+
 ## Next (from the profile)
 
 1. ~~Shard the relay by account, so tenants do not share a lock.~~ Done, above.
 2. ~~Encode a published envelope once and share its bytes across subscribers and backfill.~~ Done, above.
-3. Bounded-cost eviction for the ring byte budget and the stream limit (`enforce_ring_budget` and `ensure_stream` scan
-   an account's streams). Not visible in `fanout`; needs a scenario that holds an account at its limits.
+3. ~~Bounded-cost eviction.~~ Measured above: bounded and amortized; no change.
 4. ~~Fewer syscalls per message on the write path.~~ Measured above: set by delivery rate, not by the hub.
 5. Fixed-size ids: about 2% of samples at 500k deliveries/s. Deferred.
+6. Per-account publish rate, so one account cannot hold its shard's lock at will (`docs/ROADMAP.md`).

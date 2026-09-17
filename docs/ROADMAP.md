@@ -34,4 +34,9 @@ Open, found along the way:
   not. tokio-tungstenite 0.30 has no way to raise the limit after accept, so tightening it means reading the first
   message with a small limit and switching to a second configuration, or a pre-auth socket budget in bytes.
 
+- **No limit on how fast an account publishes.** Shards keep accounts on different locks, but an account shares its
+  shard with others, and one publishing as fast as its socket allows holds that lock as often as it likes. Every other
+  bound here is on memory; this one is on time. A per-account token bucket at `receive`, answered with
+  `Error{LIMIT}` and a close, is the obvious shape (docs/perf/README.md §Eviction at the limits).
+
 Later: agent-to-agent (lineage, spawn grants), headless runtimes, WebTransport.
