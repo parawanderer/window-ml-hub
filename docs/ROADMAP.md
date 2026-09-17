@@ -13,11 +13,12 @@ In order. Each step lands as its own PR with CI green. Design questions are answ
    server (tokio) with per-account routing, bounded rings per source, backpressure by kind (telemetry coalesced and
    dropped with a marker, session events never dropped: a subscriber that falls behind is disconnected and resyncs),
    and per-account limits. Payloads are opaque bytes from the first commit, so nothing has to be taken out later.
-5. **The hub protects itself.** Account credentials for registration, connection and rate limits per account.
-6. **Keys, pairing and end-to-end encryption.** Choose between the Noise framework and per-pair libsodium-style
-   boxes. Constraint: the extension side runs in a service worker, so the primitives must exist in WebCrypto or a
-   vetted small library there (to verify: Ed25519 and X25519 support in current Chrome's WebCrypto). Signed commands
-   with nonces and a clock window.
+5. **Accounts: the hub protects itself.** Proposed together with step 6 in
+   [design/end-to-end-crypto.md](design/end-to-end-crypto.md): an account is a root key, devices hold certificates,
+   the hub verifies signatures. Awaiting a decision.
+6. **Keys, pairing and end-to-end encryption.** Proposal: HPKE-style boxes on WebCrypto (every primitive is native in
+   the MV3 worker, [finding](findings/webcrypto-in-mv3-worker.md)), stream keys wrapped per device, signed commands
+   with nonces and a clock window. Awaiting a decision.
 7. **The box connector mode.** Needs the BoxFrame schema from the ollama fork ([SCHEMAS.md](SCHEMAS.md)).
 8. **The extension's connector** in window-ml's background worker. Last, and coordinated with the chat page work,
    because both talk to `background.ts`.

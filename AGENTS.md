@@ -55,6 +55,12 @@ Each wire schema lives beside its encoder and is pinned by commit and git blob e
   with no CDP or Playwright attached, and include an idle control that shows eviction. See
   `docs/findings/mv3-websocket-lifetime.md`.
 
+## Pull requests here
+
+PRs in this repository are **documented checkpoints**, one coherent unit of work each, not review gates: open one
+with a description that says what changed, what was decided and what is untested, and merge it yourself once CI is
+green. Stacked PRs: merge the bottom one, retarget the next to `main`, merge.
+
 ## Findings and tools
 
 A question answered by experiment gets a `docs/findings/<topic>.md` (result, method, what it means, the browser or
