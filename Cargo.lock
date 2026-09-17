@@ -1340,8 +1340,10 @@ dependencies = [
 name = "wmlhub-seal"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "getrandom",
  "hpke",
+ "sha2",
  "wmlhub-keys",
  "wmlhub-proto",
 ]

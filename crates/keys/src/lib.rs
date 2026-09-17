@@ -42,6 +42,8 @@ pub mod scope {
 const CERT_LABEL: &[u8] = b"wmlhub/cert/v1\0";
 const HELLO_LABEL: &[u8] = b"wmlhub/hello/v1\0";
 const COMMAND_LABEL: &[u8] = b"wmlhub/command/v1\0";
+const GRANT_LABEL: &[u8] = b"wmlhub/grant/v1\0";
+const STREAM_LABEL: &[u8] = b"wmlhub/stream/v1\0";
 
 /// An Ed25519 identity key held in memory: for clients, tools and tests. (The extension keeps its keys as
 /// non-extractable WebCrypto keys instead; this type is never how a browser holds one.)
@@ -224,6 +226,26 @@ pub fn sign_command(leaf: &Identity, body: &[u8]) -> Vec<u8> {
 /// Verify a command or result signature made by `leaf_key`.
 pub fn verify_command(leaf_key: &PublicKey, body: &[u8], signature: &[u8]) -> Result<(), BadSignature> {
     verify(leaf_key, COMMAND_LABEL, body, signature)
+}
+
+/// Sign an encoded `GrantBody` (a stream key handed to a device) with the publisher's leaf identity.
+pub fn sign_grant(leaf: &Identity, body: &[u8]) -> Vec<u8> {
+    leaf.sign(GRANT_LABEL, body)
+}
+
+/// Verify a grant signature made by `leaf_key`.
+pub fn verify_grant(leaf_key: &PublicKey, body: &[u8], signature: &[u8]) -> Result<(), BadSignature> {
+    verify(leaf_key, GRANT_LABEL, body, signature)
+}
+
+/// Sign a published stream frame's header and ciphertext with the publisher's leaf identity.
+pub fn sign_stream(leaf: &Identity, signed_bytes: &[u8]) -> Vec<u8> {
+    leaf.sign(STREAM_LABEL, signed_bytes)
+}
+
+/// Verify a stream frame signature made by `leaf_key`.
+pub fn verify_stream(leaf_key: &PublicKey, signed_bytes: &[u8], signature: &[u8]) -> Result<(), BadSignature> {
+    verify(leaf_key, STREAM_LABEL, signed_bytes, signature)
 }
 
 /// Sign a hello transcript with the leaf identity.

@@ -108,6 +108,27 @@ As built (`crates/seal`, wire format `proto/wmlhub/v1/seal.proto`):
 - **Box telemetry** is the same shape with the box connector as publisher: the "group key per box" the spec
   describes is this stream key.
 
+As built (`crates/seal/src/stream.rs`):
+
+- **A frame** is `StreamFrame { key_id, counter, nonce, ciphertext, signature }` in an envelope's payload. The key id
+  is `SHA-256("wmlhub/streamkey-id/v1" || 0x00 || key)[..8]`, so a publisher and a subscriber agree on it without
+  extra state. AES-256-GCM with a fresh 12-byte nonce.
+- **The signature covers a header and the ciphertext**: `publisher || len(channel) || channel || key_id || counter ||
+  nonce`, under the label `"wmlhub/stream/v1"`. That header is also the AEAD's associated data. Moving a frame to
+  another channel, relabelling its key, renumbering it or splicing another frame's ciphertext onto it each stop it
+  verifying. (Tested by removing each binding in turn: the channel, key id and counter are load-bearing; the
+  publisher id and the associated data are redundant while a reader gets the publisher's key from a grant, and are
+  kept for when one does not.)
+- **Counters are the publisher's own**, from 1, across rotations. A reader refuses a counter it has passed (a hub that
+  replays or reorders) and reports how many were skipped, which for session events means the ring was truncated.
+- **A grant** is `GrantBody { from, to, nonce, time_ms, channel, key_id, key, from_counter }`, signed under
+  `"wmlhub/grant/v1"` and sealed with info `"wmlhub/keygrant/v1"`, so a command can never be opened as a grant or a
+  grant as a command. It is checked exactly as a command is (chain, sender, signature, addressing, clock, replay), and
+  it carries the publisher's chain: that is how a subscriber learns the key that signs the stream's frames.
+- **Cost** (M4, release, three rounds of 2,000; `frame_costs`): a 512 B batch becomes a 623 B frame, sealed in 10 us
+  and opened in 25 us; 8 KB: 21-22 us and 31-32 us; 64 KB: 100-105 us and 80-84 us. A frame carries 111 bytes over its
+  batch.
+
 ### Replay and ordering
 
 - Commands: nonce plus clock window, as above.

@@ -19,6 +19,10 @@ use hpke::kdf::HkdfSha256;
 use hpke::kem::X25519HkdfSha256;
 use hpke::{Deserializable, Kem as _, OpModeR, OpModeS, Serializable};
 use wmlhub_keys::{ChainError, Identity, PublicKey, principal_id, sign_command, verify_chain, verify_command};
+
+pub use stream::{
+    Grant, MAX_STREAM_FRAME_BYTES, Published, StreamError, StreamKey, StreamReader, open_grant, seal_frame, wrap_key,
+};
 use wmlhub_proto::prost::Message;
 use wmlhub_proto::v1::{Certificate, CertificateBody, CommandBody, Sealed, SignedCommand};
 
@@ -84,6 +88,8 @@ pub struct Recipient {
 pub enum SealError {
     Random(getrandom::Error),
     Hpke(hpke::HpkeError),
+    /// AES-GCM refused to encrypt a stream frame (only a batch beyond its length limit can cause it)
+    Aead,
 }
 
 /// Seal a command needing `scope` to `to`. Returns the encoded `Sealed` and the nonce its result will answer.
@@ -132,25 +138,30 @@ fn seal(
     let signed =
         SignedCommand { signature: sign_command(from.identity, &command), body: command, chain: from.chain.to_vec() }
             .encode_to_vec();
-    let sealed = hpke_seal(&sender, to, &signed).map_err(SealError::Hpke)?;
+    let sealed = hpke_seal(SEAL_INFO_LABEL, &sender, to, &signed).map_err(SealError::Hpke)?;
     Ok((sealed, nonce))
 }
 
-fn hpke_seal(sender: &PrincipalId, to: &Recipient, plaintext: &[u8]) -> Result<Vec<u8>, hpke::HpkeError> {
+pub(crate) fn hpke_seal(
+    label: &[u8],
+    sender: &PrincipalId,
+    to: &Recipient,
+    plaintext: &[u8],
+) -> Result<Vec<u8>, hpke::HpkeError> {
     let pk = <X25519HkdfSha256 as hpke::Kem>::PublicKey::from_bytes(&to.agreement_key)?;
     let (enc, ciphertext) = hpke::single_shot_seal::<AesGcm256, HkdfSha256, X25519HkdfSha256>(
         &OpModeS::Base,
         &pk,
-        &info(sender, &to.principal),
+        &info(label, sender, &to.principal),
         plaintext,
         &[],
     )?;
     Ok(Sealed { enc: enc.to_bytes().to_vec(), ciphertext }.encode_to_vec())
 }
 
-fn info(from: &PrincipalId, to: &PrincipalId) -> Vec<u8> {
-    let mut info = Vec::with_capacity(SEAL_INFO_LABEL.len() + 64);
-    info.extend_from_slice(SEAL_INFO_LABEL);
+pub(crate) fn info(label: &[u8], from: &PrincipalId, to: &PrincipalId) -> Vec<u8> {
+    let mut info = Vec::with_capacity(label.len() + 64);
+    info.extend_from_slice(label);
     info.extend_from_slice(from);
     info.extend_from_slice(to);
     info
@@ -211,44 +222,79 @@ impl Receiver {
         Self { principal: principal_id(identity_public), agreement, account_root, replay: ReplayWindow::default() }
     }
 
-    /// Open `sealed`, which the hub delivered from `sender` (`Envelope.sender`), at this recipient's wall clock
-    /// `now_ms`. A command is accepted at most once.
-    pub fn open(&mut self, sender: &[u8], sealed: &[u8], now_ms: u64) -> Result<Opened, OpenError> {
+    /// This principal's id.
+    pub fn principal(&self) -> PrincipalId {
+        self.principal
+    }
+
+    /// Decrypt what was sealed to this principal under `label` by `sender`. The sender is the hub's stamp, and it is
+    /// bound into the HPKE info, so a ciphertext attributed to anyone else does not open.
+    pub(crate) fn unseal(&self, label: &[u8], sender: &PrincipalId, sealed: &[u8]) -> Result<Vec<u8>, OpenError> {
         if sealed.len() > MAX_SEALED_BYTES {
             return Err(OpenError::TooLarge);
         }
-        let sender: PrincipalId = sender.try_into().map_err(|_| OpenError::NotSender)?;
         let sealed = Sealed::decode(sealed).map_err(|_| OpenError::Malformed)?;
         let enc =
             <X25519HkdfSha256 as hpke::Kem>::EncappedKey::from_bytes(&sealed.enc).map_err(|_| OpenError::Malformed)?;
-        let plaintext = hpke::single_shot_open::<AesGcm256, HkdfSha256, X25519HkdfSha256>(
+        hpke::single_shot_open::<AesGcm256, HkdfSha256, X25519HkdfSha256>(
             &OpModeR::Base,
             &self.agreement.secret,
             &enc,
-            &info(&sender, &self.principal),
+            &info(label, sender, &self.principal),
             &sealed.ciphertext,
             &[],
         )
-        .map_err(|_| OpenError::Decrypt)?;
+        .map_err(|_| OpenError::Decrypt)
+    }
 
-        let signed = SignedCommand::decode(plaintext.as_slice()).map_err(|_| OpenError::Malformed)?;
-        let verified = verify_chain(&self.account_root, &signed.chain, now_ms).map_err(OpenError::Chain)?;
-        if verified.principal != sender {
+    /// The chain reaches this account's root and its leaf is the principal the hub says sent this.
+    pub(crate) fn check_chain(
+        &self,
+        sender: &PrincipalId,
+        chain: &[Certificate],
+        now_ms: u64,
+    ) -> Result<wmlhub_keys::Verified, OpenError> {
+        let verified = verify_chain(&self.account_root, chain, now_ms).map_err(OpenError::Chain)?;
+        if verified.principal != *sender {
             return Err(OpenError::NotSender);
         }
+        Ok(verified)
+    }
+
+    /// From that sender, to me, inside the clock window, and not seen before.
+    pub(crate) fn check_addressing(
+        &mut self,
+        sender: &PrincipalId,
+        from: &[u8],
+        to: &[u8],
+        nonce: &[u8],
+        time_ms: u64,
+        now_ms: u64,
+    ) -> Result<[u8; NONCE_BYTES], OpenError> {
+        if from != sender {
+            return Err(OpenError::NotSender);
+        }
+        if to != self.principal {
+            return Err(OpenError::NotForMe);
+        }
+        let nonce: [u8; NONCE_BYTES] = nonce.try_into().map_err(|_| OpenError::Malformed)?;
+        if time_ms.abs_diff(now_ms) > CLOCK_WINDOW_MS {
+            return Err(OpenError::Clock);
+        }
+        self.replay.admit(*sender, nonce, now_ms)?;
+        Ok(nonce)
+    }
+
+    /// Open `sealed`, which the hub delivered from `sender` (`Envelope.sender`), at this recipient's wall clock
+    /// `now_ms`. A command is accepted at most once.
+    pub fn open(&mut self, sender: &[u8], sealed: &[u8], now_ms: u64) -> Result<Opened, OpenError> {
+        let sender: PrincipalId = sender.try_into().map_err(|_| OpenError::NotSender)?;
+        let plaintext = self.unseal(SEAL_INFO_LABEL, &sender, sealed)?;
+        let signed = SignedCommand::decode(plaintext.as_slice()).map_err(|_| OpenError::Malformed)?;
+        let verified = self.check_chain(&sender, &signed.chain, now_ms)?;
         verify_command(&verified.leaf_key, &signed.body, &signed.signature).map_err(|_| OpenError::Signature)?;
 
         let body = CommandBody::decode(signed.body.as_slice()).map_err(|_| OpenError::Malformed)?;
-        if body.from != sender {
-            return Err(OpenError::NotSender);
-        }
-        if body.to != self.principal {
-            return Err(OpenError::NotForMe);
-        }
-        let nonce: [u8; NONCE_BYTES] = body.nonce.as_slice().try_into().map_err(|_| OpenError::Malformed)?;
-        if body.time_ms.abs_diff(now_ms) > CLOCK_WINDOW_MS {
-            return Err(OpenError::Clock);
-        }
         let answers = match (body.answers.is_empty(), body.scope.is_empty()) {
             // a command names the scope it needs, and the sender's certificate must grant it
             (true, false) => {
@@ -261,7 +307,8 @@ impl Receiver {
             (false, true) => Some(body.answers.as_slice().try_into().map_err(|_| OpenError::Malformed)?),
             _ => return Err(OpenError::Malformed),
         };
-        self.replay.admit(sender, nonce, now_ms)?;
+        // Addressing and the replay window last: only a command that verified may take a place in the window.
+        let nonce = self.check_addressing(&sender, &body.from, &body.to, &body.nonce, body.time_ms, now_ms)?;
         Ok(Opened {
             from: sender,
             scope: body.scope,
@@ -317,6 +364,8 @@ impl ReplayWindow {
         Ok(())
     }
 }
+
+mod stream;
 
 #[cfg(test)]
 mod tests;
