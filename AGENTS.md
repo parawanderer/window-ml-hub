@@ -79,6 +79,12 @@ to fail is not evidence. How: [`docs/FUZZING.md`](docs/FUZZING.md).
 Each wire schema lives beside its encoder and is pinned by commit and git blob everywhere else:
 [`docs/SCHEMAS.md`](docs/SCHEMAS.md). Never edit a vendored `.proto`: replace it wholesale and update its pin.
 
+**A change under `proto/wmlhub/` gets a line in [`proto/wmlhub/CHANGES.md`](proto/wmlhub/CHANGES.md)**, including an
+additive field nobody has to act on. CI refuses the pull request otherwise (`tools/check-schema-changes.sh`). The
+reason it is a gate and not a habit is that the failure is invisible from the side it happens to: a reader's code is
+correct against the schema it holds and simply never asks for what it does not know about, so a missing field is
+found by the feature it breaks, weeks later. Say what changed and whether a reader has to do anything.
+
 ## Rust conventions
 
 - The toolchain is pinned in `rust-toolchain.toml`; bump it only in its own commit.

@@ -42,8 +42,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # the changed-schema check diffs against the base, so the base has to be here
+          fetch-depth: 0
       - name: Vendored schemas match their pins
         run: tools/check-pins.sh
+      - name: A schema this repository owns says when it changed
+        if: github.event_name == 'pull_request'
+        run: tools/check-schema-changes.sh "origin/${{ github.base_ref }}"
 
   # Coverage-guided fuzzing, 30 s per target on every push (docs/FUZZING.md). A crash is uploaded as an artifact.
   fuzz:
