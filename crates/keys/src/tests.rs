@@ -331,3 +331,39 @@ fn what_only_the_root_may_grant_does_not_travel_through_a_delegate() {
         assert!(verify_chain(&root.public(), &[direct], NOW).is_ok(), "{never} from the root");
     }
 }
+
+/// What admitting a connection costs in signature verification, for docs/PROTOCOL.md §Limits. Numbers, not
+/// assertions: `cargo test --release -p wmlhub-keys chain_and_hello_costs -- --ignored --nocapture`.
+#[test]
+#[ignore]
+fn chain_and_hello_costs() {
+    use std::time::Instant;
+    const N: u32 = 2_000;
+    let root = Identity::from_seed([1; 32]);
+    let phone = Identity::from_seed([2; 32]);
+    let leaf = issue_ok(
+        &root,
+        &CertSpec {
+            subject: phone.public(),
+            agreement_key: [3; 32],
+            role: Role::Client,
+            scopes: vec![scope::VIEW.into()],
+            may_pair: false,
+            not_before_ms: NOW - 1_000,
+            not_after_ms: NOW + 1_000_000,
+            label: String::new(),
+        },
+    );
+    let chain = vec![leaf];
+    let verified = verify_chain(&root.public(), &chain, NOW).unwrap();
+    let transcript = hello_transcript("hub.test", &[9; 32], &verified.principal, Role::Client, &verified.account);
+    let signature = sign_hello(&phone, &transcript);
+
+    let start = Instant::now();
+    for _ in 0..N {
+        let v = verify_chain(&root.public(), &chain, NOW).unwrap();
+        let t = hello_transcript("hub.test", &[9; 32], &v.principal, Role::Client, &v.account);
+        verify_hello(&v.leaf_key, &t, &signature).unwrap();
+    }
+    eprintln!("one-certificate chain + hello: {:?} each", start.elapsed() / N);
+}

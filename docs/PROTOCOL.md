@@ -111,6 +111,13 @@ contract's `epoch`/`cursor`, inside the ciphertext, are the runtime's own and su
   the hub reads the account's connections more slowly until the debt is repaid: sends back up in TCP, nothing is
   dropped, nothing is closed. A connection made to wait 100 ms or more is told with `Error{THROTTLED}`, at most once
   every 10 seconds, so a client finds out without being disconnected for a burst. A new account starts with nothing banked.
+- **A connection costs the same budget.** Admitting one is charged `CONNECT_COST_BYTES` (768, twelve frames' worth):
+  a connect and the disconnect that follows it cost about 52 us of hub CPU against 4.7 us for a delivery, so an
+  account spends the same budget whether it connects or sends. A handshake is the one piece of work that cannot be
+  slowed down instead, because there is no connection to read more slowly yet, so an account whose debt is more than
+  a second deep (`CONNECT_REFUSED_ABOVE_MS`) is refused with `Error{LIMIT}` saying how long to wait, rather than
+  admitted and charged. Ordinary traffic makes a debt of milliseconds, so a phone can still log in while a runtime
+  is publishing hard; a client that only connects and disconnects cannot.
 - **Every number the hub chooses fits in a double** (2^53 - 1): `seq`, `epoch`, and the times in `Welcome`. The wire
   types are 64-bit, but a client whose only number is a double — the browser's connector — must be able to hold one
   exactly, and an epoch that rounded would make two rings look like one. A peer's own `ref` is echoed back to that

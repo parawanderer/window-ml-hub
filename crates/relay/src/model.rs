@@ -204,7 +204,7 @@ impl Model {
                     role: Role::Client as i32,
                     ..Default::default()
                 };
-                match self.hub.connect(account_id(account), &hello, 0) {
+                match self.hub.connect(account_id(account), &hello, 0, self.now_ms) {
                     Ok((conn, actions)) => {
                         self.slots.push(Slot { conn, account, principal });
                         actions

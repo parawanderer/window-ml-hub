@@ -235,3 +235,19 @@ blocked by it.
 4. ~~Fewer syscalls per message on the write path.~~ Measured above: set by delivery rate, not by the hub.
 5. Fixed-size ids: about 2% of samples at 500k deliveries/s. Deferred.
 6. ~~Per-account publish rate.~~ Done, above.
+
+## What a connection costs
+
+Measured on an M4 in release, 2,000 iterations each (`cargo test --release -p wmlhub-relay connect_costs --
+--ignored --nocapture`, and `chain_and_hello_costs` in `wmlhub-keys`):
+
+| | per connect and its disconnect |
+| --- | --- |
+| certificate chain (one certificate) + hello signature | 48.6 us |
+| relay: welcome burst, presence in and out, no siblings | 0.7 us |
+| the same with 8 devices on the account | 3.2 us |
+| the same at the connection cap (63) | 19.3 us |
+
+So a connection is about 52 us of hub CPU for an ordinary account, against 4.7 us for a delivery, which is where
+`CONNECT_COST_BYTES` (twelve frames' worth) comes from. Verification dominates by an order of magnitude, which is
+why the charge is flat rather than scaled by how many devices hear the presence.

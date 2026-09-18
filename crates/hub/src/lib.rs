@@ -217,7 +217,7 @@ impl Shared {
                 }
                 1
             };
-            let result = st.hub.connect(account, hello, now_ms());
+            let result = st.hub.connect(account, hello, now_ms(), self.clock_ms());
             self.reconcile_accounts(&mut st, reserved);
             match result {
                 Ok((id, actions)) => {

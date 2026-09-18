@@ -18,9 +18,14 @@ fn acct(name: &str) -> AccountId {
     AccountId(name.as_bytes().to_vec())
 }
 
-/// Connect and discard the welcome burst.
+/// Connect and discard the welcome burst. The relay's monotonic clock starts at 0 in these tests, and connecting is
+/// what starts an account's budget, so a test that charges later says when it connected.
 fn join(h: &mut Hub, account: &str, principal: &str, role: Role) -> ConnId {
-    let (id, _) = h.connect(acct(account), &hello(principal, role), NOW).unwrap();
+    join_at(h, account, principal, role, 0)
+}
+
+fn join_at(h: &mut Hub, account: &str, principal: &str, role: Role, mono_ms: u64) -> ConnId {
+    let (id, _) = h.connect(acct(account), &hello(principal, role), NOW, mono_ms).unwrap();
     h.take_outbound(id, usize::MAX);
     id
 }
@@ -133,7 +138,7 @@ fn a_command_cannot_reach_a_principal_in_another_account_even_when_it_is_online(
 fn presence_never_crosses_accounts() {
     let mut h = hub();
     let a = join(&mut h, "alice", "rt", Role::Runtime);
-    let (m, _) = h.connect(acct("mallory"), &hello("phone", Role::Client), NOW).unwrap();
+    let (m, _) = h.connect(acct("mallory"), &hello("phone", Role::Client), NOW, 0).unwrap();
     assert_eq!(out(&mut h, m), ["welcome"]);
     assert!(out(&mut h, a).is_empty());
 }
@@ -142,7 +147,7 @@ fn presence_never_crosses_accounts() {
 fn the_same_principal_id_may_exist_in_two_accounts() {
     let mut h = hub();
     join(&mut h, "alice", "rt", Role::Runtime);
-    assert!(h.connect(acct("bob"), &hello("rt", Role::Runtime), NOW).is_ok());
+    assert!(h.connect(acct("bob"), &hello("rt", Role::Runtime), NOW, 0).is_ok());
 }
 
 // ------------------------------ principals ------------------------------
@@ -151,15 +156,15 @@ fn the_same_principal_id_may_exist_in_two_accounts() {
 fn a_second_connection_for_an_online_principal_is_refused() {
     let mut h = hub();
     join(&mut h, "alice", "rt", Role::Runtime);
-    let err = h.connect(acct("alice"), &hello("rt", Role::Runtime), NOW).unwrap_err();
+    let err = h.connect(acct("alice"), &hello("rt", Role::Runtime), NOW, 0).unwrap_err();
     assert_eq!(show(&[*err]), ["error Unauthenticated ref=0"]);
 }
 
 #[test]
 fn a_refused_hello_leaves_no_account_behind() {
     let mut h = Hub::new(Limits { max_accounts: 1, ..Limits::default() }, 1).unwrap();
-    assert!(h.connect(acct("x"), &hello("", Role::Client), NOW).is_err());
-    assert!(h.connect(acct("y"), &hello("p", Role::Client), NOW).is_ok());
+    assert!(h.connect(acct("x"), &hello("", Role::Client), NOW, 0).is_err());
+    assert!(h.connect(acct("y"), &hello("p", Role::Client), NOW, 0).is_ok());
 }
 
 #[test]
@@ -180,7 +185,7 @@ fn the_hub_stamps_the_sender_whatever_the_peer_claims() {
 fn a_new_connection_sees_who_is_online_and_others_see_it_arrive_and_leave() {
     let mut h = hub();
     let rt = join(&mut h, "alice", "rt", Role::Runtime);
-    let (phone, _) = h.connect(acct("alice"), &hello("phone", Role::Client), NOW).unwrap();
+    let (phone, _) = h.connect(acct("alice"), &hello("phone", Role::Client), NOW, 0).unwrap();
     assert_eq!(out(&mut h, phone), ["welcome", "presence rt on"]);
     assert_eq!(out(&mut h, rt), ["presence phone on"]);
     h.close(phone, None);
@@ -192,7 +197,7 @@ fn an_empty_account_is_forgotten() {
     let mut h = Hub::new(Limits { max_accounts: 1, ..Limits::default() }, 1).unwrap();
     let c = join(&mut h, "a", "p", Role::Client);
     h.close(c, None);
-    assert!(h.connect(acct("b"), &hello("p", Role::Client), NOW).is_ok());
+    assert!(h.connect(acct("b"), &hello("p", Role::Client), NOW, 0).is_ok());
 }
 
 // ------------------------------ publish and subscribe ------------------------------
@@ -418,8 +423,8 @@ fn resubscribing_with_envelopes_still_queued_delivers_each_seq_once_in_order() {
 fn shards_hand_out_connection_ids_that_never_collide() {
     let mut a = Hub::with_id_space(Limits::default(), 1, 0).unwrap();
     let mut b = Hub::with_id_space(Limits::default(), 1, 1).unwrap();
-    let ida = a.connect(acct("x"), &hello("p", Role::Client), NOW).unwrap().0;
-    let idb = b.connect(acct("x"), &hello("p", Role::Client), NOW).unwrap().0;
+    let ida = a.connect(acct("x"), &hello("p", Role::Client), NOW, 0).unwrap().0;
+    let idb = b.connect(acct("x"), &hello("p", Role::Client), NOW, 0).unwrap().0;
     assert_ne!(ida, idb);
     assert_eq!(idb >> 48, 1);
 }
@@ -504,23 +509,28 @@ fn an_accounts_work_budget_is_shared_by_its_connections_and_no_one_elses() {
         join(&mut h, "a", "phone", Role::Client),
         join(&mut h, "b", "rt", Role::Runtime),
     );
-    assert_eq!(h.charge(a1, 0, 5).0, 0, "the first charge starts the account's clock");
-    assert_eq!(h.charge(b, 0, 5).0, 0);
-    assert_eq!(h.charge(a1, 10_000, 1_005).0, 0, "a full second's rate, earned since");
-    assert_eq!(h.charge(a2, 5_000, 1_005).0, 500, "the other connection pays the same account's debt");
-    assert_eq!(h.charge(b, 10_000, 1_005).0, 0, "another account is untouched");
+    // Both accounts connected at 0 and owe CONNECT_COST_BYTES per connection; two seconds on, both have earned that
+    // back and are at their burst.
+    assert_eq!(h.charge(a1, 10_000, 2_000).0, 0, "a full burst, earned since and spent at once");
+    assert_eq!(h.charge(a2, 5_000, 2_000).0, 500, "the other connection pays the same account's debt");
+    assert_eq!(h.charge(b, 10_000, 2_000).0, 0, "another account is untouched");
 }
 
 #[test]
 fn a_new_account_starts_with_no_budget_even_after_being_forgotten() {
     let mut h = budgeted(10_000);
     let rt = join(&mut h, "a", "rt", Role::Runtime);
-    h.charge(rt, 0, 0);
     assert_eq!(h.charge(rt, 10_000, 60_000).0, 0, "a minute in, capped at one second's burst");
     h.close(rt, None);
     assert!(!h.has_account(&acct("a")), "nothing retained, so the relay forgot the account");
-    let rt = join(&mut h, "a", "rt", Role::Runtime);
-    assert_eq!(h.charge(rt, 10_000, 60_000).0, 1_000, "coming back is not a fresh burst");
+    // it comes back a minute later, and what it gets is an empty bucket rather than a minute's worth
+    let rt = join_at(&mut h, "a", "rt", Role::Runtime, 60_000);
+    let connect_ms = (CONNECT_COST_BYTES as u64 * 1_000).div_ceil(10_000);
+    assert_eq!(
+        h.charge(rt, 10_000, 60_000).0,
+        1_000 + connect_ms,
+        "coming back is not a fresh burst, and the connection itself was charged"
+    );
 }
 
 #[test]
@@ -543,6 +553,58 @@ fn frames_the_relay_queues_are_charged_to_the_account_that_caused_them() {
 }
 
 #[test]
+fn connecting_costs_the_account_and_a_flood_of_handshakes_is_refused() {
+    // A handshake is the one piece of work that cannot be slowed down instead, since there is no connection to read
+    // more slowly yet: a client that only connects and disconnects would otherwise cost an account nothing.
+    let mut h = budgeted(1_000);
+    let opened =
+        |h: &mut Hub, n: u32| h.connect(acct("a"), &hello(&format!("p{n}"), Role::Client), NOW, 0).map(|(id, _)| id);
+    let mut open = Vec::new();
+    for n in 0..64 {
+        match opened(&mut h, n) {
+            Ok(id) => open.push(id),
+            Err(refusal) => {
+                let message = format!("{refusal:?}");
+                assert!(message.contains("try again in"), "it says how long to wait: {message}");
+                assert!(n > 1, "the first connection of an account is never refused");
+                // and the debt clears: a second later it is admitted again
+                let later = h.connect(acct("a"), &hello("later", Role::Client), NOW, 10_000);
+                assert!(later.is_ok(), "the account earned its way back: {later:?}");
+                return;
+            }
+        }
+    }
+    panic!("64 handshakes at a byte a millisecond were all admitted");
+}
+
+#[test]
+fn one_accounts_handshakes_do_not_refuse_anothers() {
+    let mut h = budgeted(1_000);
+    // a spends until it is refused
+    let mut refused = false;
+    for n in 0..64 {
+        if h.connect(acct("a"), &hello(&format!("p{n}"), Role::Client), NOW, 0).is_err() {
+            refused = true;
+            break;
+        }
+    }
+    assert!(refused, "the point of this test is a in debt");
+    assert!(h.connect(acct("b"), &hello("rt", Role::Runtime), NOW, 0).is_ok(), "b connects as if a did not exist");
+}
+
+#[test]
+fn a_busy_account_can_still_connect_a_device() {
+    // The failure this must not have: a phone that cannot log in because the runtime is publishing hard. Ordinary
+    // traffic makes a debt of milliseconds; CONNECT_REFUSED_ABOVE_MS is a second.
+    let mut h = budgeted(10_000);
+    let rt = join(&mut h, "a", "rt", Role::Runtime);
+    let (wait, _) = h.charge(rt, 10_500, 1_000);
+    assert!(wait > 0, "the runtime is in debt and being read more slowly");
+    assert!(wait <= CONNECT_REFUSED_ABOVE_MS, "but not by anything like enough to refuse a device");
+    assert!(h.connect(acct("a"), &hello("phone", Role::Client), NOW, 1_000).is_ok());
+}
+
+#[test]
 fn a_zero_work_rate_is_a_configuration_error() {
     let zero = Limits { account_bytes_per_second: 0, ..Limits::default() };
     assert!(Hub::new(zero, 7).is_err());
@@ -552,14 +614,17 @@ fn a_zero_work_rate_is_a_configuration_error() {
 fn a_throttled_connection_is_told_once_every_ten_seconds_and_stays_open() {
     let mut h = budgeted(1_000);
     let rt = join(&mut h, "a", "rt", Role::Runtime);
-    assert_eq!(h.charge(rt, 0, 0), (0, Vec::new()));
+    // At a byte a millisecond, connecting costs this account exactly CONNECT_COST_BYTES milliseconds. Everything
+    // below is measured from where that is repaid, so the numbers are about throttling and not about the handshake.
+    let paid = CONNECT_COST_BYTES as u64;
+    assert_eq!(h.charge(rt, 0, paid), (0, Vec::new()));
     assert!(out(&mut h, rt).is_empty(), "not in debt: nothing to say");
-    assert_eq!(h.charge(rt, 99, 0).0, 99);
+    assert_eq!(h.charge(rt, 99, paid).0, 99);
     assert!(out(&mut h, rt).is_empty(), "a wait under 100 ms is not worth a notice");
-    h.charge(rt, 0, 99);
+    h.charge(rt, 0, paid + 99);
     let throttled = |h: &mut Hub| out(h, rt).iter().filter(|l| l.contains("Throttled")).count();
     let mut notices = 0;
-    for ms in (0..=25_000).step_by(100) {
+    for ms in (paid..=paid + 25_000).step_by(100) {
         let (wait, actions) = h.charge(rt, 10_000, ms);
         assert!(wait > 0);
         assert!(closed(&actions).is_empty(), "throttling never closes");
@@ -590,9 +655,9 @@ fn presence_carries_the_chain_of_whoever_came_online() {
     let mut h = hub();
     let chain = vec![Certificate { body: vec![1; 200], signature: vec![2; 64] }];
     let phone_hello = v1::Hello { chain: chain.clone(), ..hello("phone", Role::Client) };
-    let (phone, _) = h.connect(acct("a"), &phone_hello, NOW).unwrap();
+    let (phone, _) = h.connect(acct("a"), &phone_hello, NOW, 0).unwrap();
     // connected without draining: the presence backfill arrives in the same burst as the welcome
-    let (rt, _) = h.connect(acct("a"), &hello("rt", Role::Runtime), NOW).unwrap();
+    let (rt, _) = h.connect(acct("a"), &hello("rt", Role::Runtime), NOW, 0).unwrap();
 
     // the runtime is told about the phone as it joins, with the chain
     let seen = drain(&mut h, rt);
@@ -605,7 +670,7 @@ fn presence_carries_the_chain_of_whoever_came_online() {
     // and the phone is told about the runtime as IT joins
     h.take_outbound(phone, usize::MAX);
     let joining = v1::Hello { chain: chain.clone(), ..hello("laptop", Role::Client) };
-    h.connect(acct("a"), &joining, NOW).unwrap();
+    h.connect(acct("a"), &joining, NOW, 0).unwrap();
     let live = drain(&mut h, phone);
     let presence = live.iter().find_map(|f| match &f.body {
         Some(Body::Presence(p)) if p.principal == b"laptop" => Some(p.clone()),
@@ -621,8 +686,8 @@ fn a_chain_too_large_to_carry_is_left_out_rather_than_echoed() {
     let mut h = hub();
     let huge = vec![Certificate { body: vec![1; 4_000], signature: vec![2; 64] }];
     let phone_hello = v1::Hello { chain: huge, ..hello("phone", Role::Client) };
-    h.connect(acct("a"), &phone_hello, NOW).unwrap();
-    let (rt, _) = h.connect(acct("a"), &hello("rt", Role::Runtime), NOW).unwrap();
+    h.connect(acct("a"), &phone_hello, NOW, 0).unwrap();
+    let (rt, _) = h.connect(acct("a"), &hello("rt", Role::Runtime), NOW, 0).unwrap();
     let seen = drain(&mut h, rt);
     let presence = seen.iter().find_map(|f| match &f.body {
         Some(Body::Presence(p)) if p.principal == b"phone" => Some(p.clone()),
@@ -636,7 +701,7 @@ fn a_departure_carries_no_chain() {
     let mut h = hub();
     let chain = vec![Certificate { body: vec![1; 200], signature: vec![2; 64] }];
     let phone_hello = v1::Hello { chain, ..hello("phone", Role::Client) };
-    let (phone, _) = h.connect(acct("a"), &phone_hello, NOW).unwrap();
+    let (phone, _) = h.connect(acct("a"), &phone_hello, NOW, 0).unwrap();
     let rt = join(&mut h, "a", "rt", Role::Runtime);
     h.take_outbound(rt, usize::MAX);
     h.close(phone, None);
@@ -646,4 +711,32 @@ fn a_departure_carries_no_chain() {
         _ => None,
     });
     assert!(presence.expect("an offline presence").chain.is_empty(), "a departure says only that");
+}
+
+/// What a connection costs the relay, for docs/PROTOCOL.md §Limits. Numbers, not assertions:
+/// `cargo test --release -p wmlhub-relay connect_costs -- --ignored --nocapture`.
+///
+/// The other half of a connection's cost is the certificate chain and hello signature, which are the hub's
+/// (`wmlhub-keys` `chain_and_hello_costs`). This is the routing half: the welcome burst, the presence a joiner is
+/// told, and the presence every sibling is told twice.
+#[test]
+#[ignore]
+fn connect_costs() {
+    use std::time::Instant;
+    const N: u32 = 2_000;
+    for siblings in [0usize, 8, 63] {
+        let mut h = hub();
+        for i in 0..siblings {
+            join(&mut h, "a", &format!("sibling-{i}"), Role::Client);
+        }
+        let start = Instant::now();
+        for i in 0..N {
+            let principal = format!("joiner-{i}");
+            let (id, _) = h.connect(acct("a"), &hello(&principal, Role::Client), NOW, 0).unwrap();
+            h.take_outbound(id, usize::MAX);
+            h.close(id, None);
+        }
+        let each = start.elapsed() / N;
+        eprintln!("{siblings} siblings: connect + disconnect {each:?}");
+    }
 }
