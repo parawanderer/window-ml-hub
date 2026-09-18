@@ -23,7 +23,7 @@ changed=$(git diff --name-only "$base...HEAD" -- "${owned[@]}" || true)
 [[ -z "$changed" ]] && { echo "ok      no contract this repository owns was changed"; exit 0; }
 
 if grep -qx "$notes" <<<"$changed"; then
-    echo "ok      $(grep -vx "$notes" <<<"$changed" | wc -l | tr -d ' ') schema file(s) changed, and $notes says so"
+    echo "ok      $(grep -vx "$notes" <<<"$changed" | wc -l | tr -d ' ') contract file(s) changed, and $notes says so"
     exit 0
 fi
 cat >&2 <<MSG
