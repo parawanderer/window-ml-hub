@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 use wmlhub_keys::{CertSpec, Identity, issue, principal_id, scope};
-use wmlhub_proto::v1::Role;
+use wmlhub_proto::v1::{Certificate, Role};
 use wmlhub_seal::{AgreementKey, Receiver, Recipient, Sender, seal_command};
 
 /// `issue`, which now refuses a spec every verifier would reject.
