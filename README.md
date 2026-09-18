@@ -97,6 +97,8 @@ account either with an operator invite (`--registration invite`, the default) or
 ```bash
 cargo run -p wmlhub-connector --bin wmlbox -- pair --hub wss://hub.example.com --label mlbox
 cargo run -p wmlhub-connector --bin wmlbox -- status
+cargo run -p wmlhub-connector --bin wmlbox -- run --hub wss://hub.example.com --hub-name hub.example.com \
+    --box http://127.0.0.1:11434/api/events
 ```
 
 `pair` prints a code and a fingerprint. Type the code into a device on the account that may pair, and check it

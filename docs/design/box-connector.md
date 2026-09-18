@@ -80,3 +80,45 @@ A client merges the two by absolute time, which is why `t` is converted on inges
 - Captures of `evict`, `load.failed` and `lease.*` for conformance vectors, when the box is idle.
 - Whether real captures can be committed to this public repository: they carry model names, hardware details and
   request hints.
+
+## Who gets the key (decided 2026-09-18)
+
+A publisher has to wrap its stream key for every device allowed to read it, and a connector has no directory of an
+account's devices: it knows its own keys and whatever reaches it. **So the device asks.** It sends a sealed command
+with body `box.grant` under the `view` scope, and the connector wraps the current key for both of its channels and
+sends each back as an ordinary key grant.
+
+What makes that safe is that the asking is a sealed command like any other. The seal carries the sender's chain up
+to the account root, the scope its leaf grants, and the agreement key to wrap to, so every input to the decision is
+already authenticated by the time the connector sees it. A connector that was handed a LIST of devices instead
+would be trusting whoever handed it the list, which on this design is the hub.
+
+- **A refusal is silence.** The common refusal never reaches the connector at all: a command from a principal whose
+  certificate does not grant `view` fails in `Receiver::open`, so there is nothing to answer it with. The asker
+  learns it worked when the grant arrives, and that the connector is there from presence.
+- **A grant covers the whole key.** The stream key is generated when a connector starts, so "everything this key
+  covered" is one run of it, and a restart is a rotation nobody has to coordinate: the new key has a new id, and a
+  device that held the old one asks again when frames stop opening.
+- **The channels are named for the connector's principal**, not for a label: `channel(purpose, principal_id)` under
+  the account's channel key. A device knows the principal from the paired-devices list and the channel key from its
+  own pairing, so it can name the channels without being told, and two boxes an operator called the same thing do
+  not collide.
+- **`box.grant` is not the session contract.** window-ml's `SESSION_CONTRACT.md` is a runtime's vocabulary and a
+  connector implements none of it. This is the whole of the connector's own: one name, no arguments.
+
+## The two halves, and why the loop is split
+
+One websocket carries both what the connector publishes and what devices ask of it, so one task owns it and waits
+on two things at once: a frame from the box, and whatever the hub has to say.
+
+That means the box side cannot be in the same loop, because a loop waiting on a box is not reading its hub. It is
+its own task, handing frames over a bounded channel (`PENDING_FRAMES`), and a full channel stops it reading the
+box, which is the right way round: a hub that cannot keep up should slow the connector down rather than fill its
+memory.
+
+The duplicate check and the resume point live on the PUBLISHING side, because a frame is only a duplicate once it
+has actually been published, and a frame handed over that the hub then refused must be asked for again. The box
+side learns where to resume from a watch the publisher writes.
+
+The select is only sound because `Client::next` is safe to drop: frames already read stay in the client, and the
+one thing a dropped call can lose is a pong, which the hub's idle timeout does not count separately.
