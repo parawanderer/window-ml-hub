@@ -1,6 +1,8 @@
 # Proposal: pairing a device, a runtime or a connector
 
-**Status: proposed 2026-09-18, not built.** The last thing between the hub and real use: every principal needs a
+**Status: decided, being built.** The pieces that are pure — the slot store the hub keeps (`crates/hub/src/pairing.rs`)
+and the code and fingerprint a person carries and compares (`crates/keys/src/pairing.rs`) — are in. The wire, and the
+two sides that drive it, are next. The last thing between the hub and real use: every principal needs a
 certificate, and nothing issues one yet. It blocks the connector's binary (roadmap step 7), the extension's connector
 (step 8), and the chat page's pairing UI, which the UI session builds against whatever this decides.
 
@@ -64,9 +66,14 @@ ever sees a code it did not pick.
 6. **The new principal takes the certificate**, verifies it chains to the account root it was told to expect, and logs
    in normally. The slot is deleted on first collection.
 
-The fingerprint is `SHA-256("wmlhub/pairing/v1" || identity_key || agreement_key)`, rendered as six words from a fixed
-list, or twelve hex characters where words are wrong (a printed connector). Six words is about 60 bits against a
-prepared list, which is the number that matters: a hub gets one attempt, in front of a person who is comparing.
+The fingerprint is `SHA-256("wmlhub/pairing/v1" || identity_key || agreement_key)`. `crates/keys` hands back the
+digest and a twelve-character hex rendering for where words are wrong (a connector printing to a terminal); the word
+rendering belongs to whichever UI shows it, and window-ml's session owns that choice, including whether words beat a
+number for people comparing two screens quickly.
+
+The code is eight characters of Crockford base32 (40 bits), read back however a person typed it — lower case, spaces,
+hyphens, and the confusions that alphabet exists for (`O` as `0`, `I` and `L` as `1`). The hub is told
+`SHA-256("wmlhub/pairing-code/v1" || code)` and never the code.
 
 ## What this costs the hub, and what bounds it
 
