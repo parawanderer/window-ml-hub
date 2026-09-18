@@ -31,6 +31,10 @@ pub const THROTTLE_NOTICE_MS: u64 = 10_000;
 /// wait a millisecond or so; announcing that would greet every fresh account with a throttle notice.
 pub const THROTTLE_NOTICE_MIN_WAIT_MS: u64 = 100;
 
+/// The largest integer a double holds exactly (2^53 - 1). Values the hub CHOOSES stay inside it, so every client
+/// language can carry them without loss; the wire types are still 64-bit.
+pub const MAX_EXACT_IN_A_DOUBLE: u64 = (1 << 53) - 1;
+
 /// The protocol major this relay speaks.
 pub const PROTOCOL: u32 = 1;
 
@@ -628,6 +632,10 @@ impl Hub {
             z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
             z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
             z ^= z >> 31;
+            // Kept inside a double's exact range: an epoch only has to DIFFER between rings, and a client in a
+            // language whose only number is a double (the browser's connector) cannot hold a full u64 without
+            // reaching for BigInt everywhere an epoch travels. The field stays uint64 on the wire.
+            z &= MAX_EXACT_IN_A_DOUBLE;
             if z != 0 {
                 return z;
             }

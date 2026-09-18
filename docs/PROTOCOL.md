@@ -111,6 +111,10 @@ contract's `epoch`/`cursor`, inside the ciphertext, are the runtime's own and su
   the hub reads the account's connections more slowly until the debt is repaid: sends back up in TCP, nothing is
   dropped, nothing is closed. A connection made to wait 100 ms or more is told with `Error{THROTTLED}`, at most once
   every 10 seconds, so a client finds out without being disconnected for a burst. A new account starts with nothing banked.
+- **Every number the hub chooses fits in a double** (2^53 - 1): `seq`, `epoch`, and the times in `Welcome`. The wire
+  types are 64-bit, but a client whose only number is a double — the browser's connector — must be able to hold one
+  exactly, and an epoch that rounded would make two rings look like one. A peer's own `ref` is echoed back to that
+  peer only, so a peer that chooses a larger one is the only one who suffers for it.
 - **A peer answers every `Ping` with a `Pong`**, and a connection that sends nothing at all for 60 seconds is closed
   with `Error{LIMIT}`. The hub pings every 20 seconds.
 - `Ping`/`Pong` keep a quiet connection alive. The MV3 finding (`docs/findings/mv3-websocket-lifetime.md`) is that

@@ -566,3 +566,18 @@ fn a_throttled_connection_is_told_once_every_ten_seconds_and_stays_open() {
     }
     assert_eq!(notices, 3, "at 0, 10 and 20 seconds");
 }
+
+#[test]
+fn every_epoch_a_hub_chooses_fits_in_a_double() {
+    // A browser client holds an epoch in a double; anything above 2^53 - 1 would be rounded, and two rings could
+    // then look like one. The seeds here are arbitrary; the property is over all of them.
+    for seed in [0u64, 1, 7, u64::MAX, 0x9e37_79b9_7f4a_7c15, 12_345_678_901_234_567_890] {
+        let mut h = Hub::new(Limits::default(), seed).unwrap();
+        for _ in 0..1_000 {
+            let epoch = h.next_epoch();
+            assert!(epoch != 0, "an epoch of 0 means 'no ring' on the wire");
+            assert!(epoch <= MAX_EXACT_IN_A_DOUBLE, "epoch {epoch} is larger than a double holds exactly");
+            assert_eq!(epoch as f64 as u64, epoch, "epoch {epoch} does not survive a double");
+        }
+    }
+}

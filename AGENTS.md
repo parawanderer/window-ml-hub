@@ -27,6 +27,9 @@ Read before changing the relay: [`RUNTIME_HUB.md`](https://github.com/parawander
   not be able to starve another, of memory or of time: work an account causes is charged to its budget (rate.rs),
   including frames the relay queues on its behalf. A new code path that makes the relay queue frames goes through
   `Conn::arm`, which counts them.
+- **Anything the hub CHOOSES fits in a double** (`MAX_EXACT_IN_A_DOUBLE`). The browser's connector holds a `seq` or
+  an `epoch` in a double, and a full 64-bit epoch cannot round-trip: the TypeScript decoder threw on the first
+  real connection. The wire types stay 64-bit.
 - **The relay takes one clock per purpose.** `connect` gets wall-clock time (it goes into `Welcome`); `charge` gets
   the server's monotonic clock, and the work budget reads nothing else. Mixing them left a bucket that never refilled.
 - **Nothing is addressable across accounts.** Every lookup that finds a principal, a runtime or a ring is keyed by
