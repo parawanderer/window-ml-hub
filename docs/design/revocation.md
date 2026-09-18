@@ -1,9 +1,12 @@
 # Proposal: revoking a device, once it already holds keys
 
-**Status: proposed, nothing built. The four questions below are answered** (see Decided), and one new one is open:
-where the account root key lives, which decides whether a revocation can be signed when a person asks for it. The argument it continues is window-ml `tmp/hub-revocation-and-headless-pairing.md`
-(the UI session's answer, worth reading for the reasoning) and [`pairing.md`](pairing.md) §Revocation, which settled
-the two halves that could not wait: every certificate now carries a bounded window, and a headless connector pairs
+**Status: proposed, nothing built, and now fully specified.** The five questions below are all answered: the four
+in Decided, and where the account root key lives, which decided that the runtime holds a never-delegable
+`may_revoke` rather than the root itself. Two things follow that are changes to shipped code rather than to this
+proposal, and they are the first work here: `version` as a timestamp, and renewal as its own case in
+`verify_chain`. The argument this continues is window-ml `tmp/hub-revocation-and-headless-pairing.md` (the UI
+session's answer, worth reading for the reasoning) and [`pairing.md`](pairing.md) §Revocation, which settled the
+two halves that could not wait: every certificate now carries a bounded window, and a headless connector pairs
 through the same protocol as a phone.
 
 What is left is the half that was deferred until pairing existed. Pairing exists.
@@ -120,28 +123,85 @@ The chat-page session answered all four, and the answers are worth their reasons
   relationship. A revoked phone's `rotation.streams` counts the connector's channels too, or the list says nothing
   is owed while the phone can still read a box.
 
-## The one this raises, which decides whether the above holds
+## Where the root key lives (2026-09-18, window-ml `tmp/chat-page-root-key-answer.md`)
 
-**Where does the account root key live?** The answers above assume something online can sign when a person revokes.
-If the root lives on a device kept apart, then `device.revoke` updates the allowlist at once and nothing is signed
-until that device is reachable, so publishers keep granting to the revoked device and the "returns at once" answer
-needs a sentence about what is still owed for longer than the rollup implies.
+**Not in a browser profile: the runtime holds `may_revoke`, never the root.** The chat-page session refused the
+first option on an asymmetry the hub session had not weighed. A stolen `may_revoke` is recoverable — a laptop that
+can revoke can lock every device out, which is a bad afternoon the root fixes by re-pairing. A stolen root is not:
+it mints a device nobody can distinguish from the person's own, for as long as the attacker keeps renewing it, and
+that is exactly the property `NEVER_DELEGABLE` exists to protect. A runtime is also the thing most likely to be
+left logged in on a laptop in a bag.
 
-Three ways out, and this is the hub session's recommendation rather than a decision:
+So option three from the list above, as proposed there:
 
-- **The runtime holds the root.** Simplest, and it is already close to true: a runtime that renews the devices on
-  its allowlist before they lapse has to issue certificates, which needs the root or a `may_pair` delegate. The cost
-  is that the account's root key lives in a browser profile, and losing the profile loses the account unless it was
-  backed up.
-- **The runtime holds `may_pair` only, and revocation waits for the root.** Honest, and the UI has to say "revoked
-  here; the keys rotate when <device> is next online", which is a worse sentence than the one we agreed.
-- **A separate `may_revoke`, granted at the runtime and never delegable.** It keeps every reason from answer 1: one
-  signer per runtime, a power the root grants explicitly rather than one that rides along with pairing, and a stolen
-  phone that does not have it. It costs a certificate field and a rule in `verify_chain`.
+- **`may_revoke` is a certificate field, never delegable**, granted explicitly at the root the way `admin` is, and
+  granted to the runtime at pairing so a revocation can be signed with the root nowhere near.
+- **Exactly one principal holds it at a time.** The list's `version` is per account and monotonic, so two signers
+  race and the loser's revocation is refused as stale, which is the worst possible way for a revocation to fail.
+  A second runtime that may revoke is the root's decision to re-place, not a default.
 
-I would build the third if the root cannot be assumed online, and the first if it can. Either way the list's
-`version` is per account and monotonic, so whatever signs must be the only thing that signs, or two signers race and
-the loser's revocation is refused as stale.
+### `version` is a timestamp, because the holder is replaceable
+
+The hub session's own argument for one signer assumed the signer never changes. It does: a lost laptop is the case
+`may_revoke` was chosen for, and the root then grants it elsewhere. A counter cannot survive that — the new holder
+would have to learn the current version from somewhere before its first list is accepted, and the only somewhere is
+a publisher it has not yet spoken to.
+
+So `version` is epoch milliseconds at signing. Monotonic per account with no coordination, and handover carries no
+state. A publisher refuses a version at or below the one it holds, and also one more than `CLOCK_WINDOW_MS` ahead
+of its own clock, so a signer with a fast clock costs at most a minute rather than locking the account out of
+revoking until the year on its wrist arrives. That is the same defence `seal` already applies to a command's time.
+
+### Renewal is not pairing, and `verify_chain` has to learn the difference
+
+The chat-page session's sharpest point, and it is a real hole in the shipped rule. A delegate may issue only scopes
+it holds and never a `NEVER_DELEGABLE` one, so nothing but the root can re-issue a certificate carrying `approve`,
+`control` or `admin`. With `MAX_CERTIFICATE_MS` at 90 days, that reads as "produce the root device four times a
+year or your phone stops approving" — and once per powerful device, scattered across the calendar, not once per
+account.
+
+Pairing issues a certificate for a NEW subject with scopes chosen then. Renewal re-issues an EXISTING subject's
+certificate, unchanged but for its window. The first grants something; the second grants nothing that was not
+already granted, which is why a delegate may do it for scopes it could not itself grant.
+
+Concretely, `CertificateBody` gains an optional embedded predecessor, and a certificate that carries one is
+exempted from `ScopeWidened` and `NotDelegable` — the two checks that make delegation safe, so the exemption is
+bought strictly:
+
+1. The predecessor's signature verifies **under the account root**, never under a delegate. Renewals do not chain,
+   so a delegate cannot bootstrap one into a wider one.
+2. The predecessor's window is **not** checked. An expired predecessor is the normal case; that is the point.
+3. Every other field is **equal**: `subject`, `agreement_key`, `role`, `scopes` (as a set), `may_pair`. The
+   agreement key matters most and is the field a loose rule would lose: it is where sealed commands go, so a
+   delegate free to change it could redirect everything sealed to an approver into a key it holds, without ever
+   holding the approver's identity key.
+4. `OutlivesIssuer` still applies. A renewal cannot outlive the runtime's own certificate.
+
+Point 4 is why this is worth the rule rather than the cheaper alternative of aligning every device's window with
+the runtime's at each root visit. Alignment drifts the moment a device is paired mid-window, and the only way to
+stop it drifting is to truncate that device to whatever is left, which hands a device paired on day 89 a one-day
+certificate. Under renewal the device gets its full window, then a short one, then a shorter one as the runtime's
+own expiry approaches, and none of that is visible to anybody, because a delegate's renewal is silent and a root's
+is a person fetching a device out of a drawer. The root visit does not disappear; it collapses to one per account
+per window, for the runtime's own certificate, which is a visit the person was making anyway.
+
+**What it costs, stated rather than discovered: letting a device lapse stops being a way to remove it.** Today an
+un-renewed device falls out of the account on its own. Once the runtime renews everything on its allowlist, a
+device leaves only by being revoked, and the allowlist is the thing that has to be right. That is a fair trade
+given `device.revoke` exists, and it is the reason the allowlist rather than expiry is called the authoritative
+act at the top of this document.
+
+The fallback, if this is not built: renewal of a device holding `approve`, `control` or `admin` requires the root,
+and those devices lapse unless the person re-blesses them. Coherent, defensible as a deliberate re-blessing, and
+the chat-page session said it would accept it. It should be a decision rather than a consequence.
+
+### What the paired-devices list has to show
+
+`mayRevoke` goes on `DeviceInfo` beside `mayPair`. It is not the noise a flag true on every account once would be,
+because *which* row carries it is the thing a person needs before acting: **revoking the holder of `may_revoke`
+removes the account's ability to revoke anything**, until the root grants it again. That row is the one the UI
+should refuse to revoke without saying so, and a holder revoking itself should be refused outright.
+
 
 ## Why not simpler
 
