@@ -10,6 +10,7 @@
 
 use hpke::Deserializable;
 use hpke::kem::X25519HkdfSha256;
+use wmlhub_keys::MAX_CHAIN;
 use wmlhub_proto::prost::Message;
 use wmlhub_proto::v1::{PairedWith, Sealed};
 
@@ -22,11 +23,15 @@ pub fn seal_pairing_answer(offered_agreement_key: &[u8; 32], paired: &PairedWith
     hpke_seal_raw(PAIRING_INFO_LABEL, offered_agreement_key, &paired.encode_to_vec()).map_err(SealError::Hpke)
 }
 
-/// Open it, with the agreement key the offer was made with.
+/// Open it, with the agreement key the offer was made with. The chain is checked for shape only: whether it verifies
+/// is the caller's business, since only the caller knows which principal it expects to be named.
 pub fn open_pairing_answer(agreement: &AgreementKey, sealed: &[u8]) -> Result<PairedWith, OpenError> {
     let plaintext = hpke_open_raw(PAIRING_INFO_LABEL, agreement, sealed)?;
     let paired = PairedWith::decode(plaintext.as_slice()).map_err(|_| OpenError::Malformed)?;
     if paired.account_root.len() != 32 || paired.channel_key.len() != 32 {
+        return Err(OpenError::Malformed);
+    }
+    if paired.chain.is_empty() || paired.chain.len() > MAX_CHAIN {
         return Err(OpenError::Malformed);
     }
     Ok(paired)

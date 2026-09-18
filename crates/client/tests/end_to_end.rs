@@ -46,6 +46,15 @@ struct Device {
 
 impl Device {
     fn new(root: &Identity, seed: u8, role: Role, scopes: &[&str]) -> Self {
+        Self::issued_by(root, seed, role, scopes, false)
+    }
+
+    /// A device the root allowed to pair others, which is what makes losing one phone survivable.
+    fn pairer(root: &Identity, seed: u8) -> Self {
+        Self::issued_by(root, seed, Role::Client, &[scope::VIEW], true)
+    }
+
+    fn issued_by(root: &Identity, seed: u8, role: Role, scopes: &[&str], may_pair: bool) -> Self {
         let identity_seed = [seed; 32];
         let identity = Identity::from_seed(identity_seed);
         let agreement_seed = [seed.wrapping_add(80); 32];
@@ -56,7 +65,7 @@ impl Device {
                 agreement_key: AgreementKey::from_seed(&agreement_seed).public(),
                 role,
                 scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
-                may_pair: false,
+                may_pair,
                 not_before_ms: now_ms() - 3_600_000,
                 not_after_ms: now_ms() + 3_600_000,
                 label: String::new(),
@@ -269,7 +278,7 @@ async fn a_new_device_pairs_through_the_hub_and_then_logs_in_with_what_it_was_gi
     // sealed to the key the offer carried, because it also hands over the account's channel key
     let channel_key = [77u8; 32];
     let paired_with = wmlhub_proto::v1::PairedWith {
-        certificate: Some(certificate),
+        chain: vec![certificate],
         account_root: root.public().to_vec(),
         channel_key: channel_key.to_vec(),
     };
@@ -284,14 +293,14 @@ async fn a_new_device_pairs_through_the_hub_and_then_logs_in_with_what_it_was_gi
     let opened = wmlhub_seal::open_pairing_answer(&AgreementKey::from_seed(&[43; 32]), &got.sealed).unwrap();
     assert_eq!(opened.account_root, root.public().to_vec());
     assert_eq!(opened.channel_key, channel_key.to_vec(), "and the account's channel key came with it");
-    let certificate = opened.certificate.expect("a certificate");
+    assert_eq!(opened.chain.len(), 1, "the root issued it, so the chain is one certificate");
 
     let paired = Client::connect(Config {
         url: url.clone(),
         hub_name: HUB.into(),
         identity: Identity::from_seed([42; 32]),
         agreement: AgreementKey::from_seed(&[43; 32]),
-        chain: vec![certificate],
+        chain: opened.chain,
         account_root: root.public(),
         role: Role::Runtime,
         invite: Vec::new(),
@@ -303,6 +312,72 @@ async fn a_new_device_pairs_through_the_hub_and_then_logs_in_with_what_it_was_gi
     // and the two can now talk
     ph.subscribe(&paired.principal(), b"events", None).await.unwrap();
     until(&mut ph, "the backfill", |e| matches!(e, Event::Backfilled(_)).then_some(())).await;
+}
+
+#[tokio::test]
+async fn a_device_the_root_allowed_to_pair_hands_over_its_own_certificate_too() {
+    use wmlhub_proto::prost::Message;
+    let url = start("pairing-delegate").await;
+    let root = Identity::from_seed([11; 32]);
+    // the root is not here: a phone it allowed to pair is, which is the case losing a phone survives
+    let delegate = Device::pairer(&root, 12);
+    let mut ph = Client::connect(delegate.config(&url, root.public(), HUB)).await.unwrap();
+
+    let new_identity = Identity::from_seed([13; 32]);
+    let new_agreement = AgreementKey::from_seed(&[14; 32]);
+    let code = wmlhub_keys::pairing::PairingCode::generate().unwrap();
+    let offer = wmlhub_proto::v1::PairingOffer {
+        identity_key: new_identity.public().to_vec(),
+        agreement_key: new_agreement.public().to_vec(),
+        role: Role::BoxConnector as i32,
+        label: "the gpu box".into(),
+        offered_at_ms: now_ms(),
+    }
+    .encode_to_vec();
+    let mut pairing = Pairing::offer(&url, &code.hash(), offer).await.unwrap();
+
+    ph.pairing_offered(&code.hash()).await.unwrap();
+    let certificate = issue(
+        &delegate.identity,
+        &CertSpec {
+            subject: new_identity.public(),
+            agreement_key: new_agreement.public(),
+            role: Role::BoxConnector,
+            scopes: Vec::new(),
+            may_pair: false,
+            not_before_ms: now_ms() - 1000,
+            // inside the delegate's own window: a certificate may not outlive the one that issued it
+            not_after_ms: now_ms() + 1_800_000,
+            label: "the gpu box".into(),
+        },
+    );
+    // the delegate's own certificate goes with it, or the new device holds a chain that stops at a key it has no
+    // reason to trust
+    let paired_with = wmlhub_proto::v1::PairedWith {
+        chain: vec![certificate, delegate.chain[0].clone()],
+        account_root: root.public().to_vec(),
+        channel_key: [15u8; 32].to_vec(),
+    };
+    let sealed = wmlhub_seal::seal_pairing_answer(&new_agreement.public(), &paired_with).unwrap();
+    ph.pairing_answer(&code.hash(), wmlhub_proto::v1::PairingAnswer { sealed }.encode_to_vec()).await.unwrap();
+
+    let got = wmlhub_proto::v1::PairingAnswer::decode(pairing.answer().await.unwrap().as_slice()).unwrap();
+    let opened = wmlhub_seal::open_pairing_answer(&AgreementKey::from_seed(&[14; 32]), &got.sealed).unwrap();
+    assert_eq!(opened.chain.len(), 2, "the leaf, and the certificate of the device that issued it");
+
+    let paired = Client::connect(Config {
+        url: url.clone(),
+        hub_name: HUB.into(),
+        identity: Identity::from_seed([13; 32]),
+        agreement: AgreementKey::from_seed(&[14; 32]),
+        chain: opened.chain,
+        account_root: root.public(),
+        role: Role::BoxConnector,
+        invite: Vec::new(),
+    })
+    .await
+    .expect("a chain through a delegate verifies at the hub");
+    assert_eq!(paired.account(), ph.account(), "it is on the account the delegate belongs to");
 }
 
 #[tokio::test]
