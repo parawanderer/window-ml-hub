@@ -23,6 +23,7 @@ fn spec(subject: &Identity) -> CertSpec {
         role: Role::Client,
         scopes: vec![scope::VIEW.into(), scope::DRIVE.into()],
         may_pair: false,
+        may_revoke: false,
         not_before_ms: NOW - 1000,
         not_after_ms: NOW + 1000,
         label: "phone".into(),
@@ -349,6 +350,7 @@ fn chain_and_hello_costs() {
             role: Role::Client,
             scopes: vec![scope::VIEW.into()],
             may_pair: false,
+            may_revoke: false,
             not_before_ms: NOW - 1_000,
             not_after_ms: NOW + 1_000_000,
             label: String::new(),
@@ -366,4 +368,189 @@ fn chain_and_hello_costs() {
         verify_hello(&v.leaf_key, &t, &signature).unwrap();
     }
     eprintln!("one-certificate chain + hello: {:?} each", start.elapsed() / N);
+}
+
+// ------------------------------ may_revoke (docs/design/revocation.md) ------------------------------
+
+#[test]
+fn the_root_may_grant_may_revoke_and_a_delegate_may_not() {
+    let (root, laptop, phone) = (id(1), id(2), id(3));
+    let from_root = issue_ok(&root, &CertSpec { may_revoke: true, ..spec(&laptop) });
+    let v = verify_chain(&root.public(), &[from_root], NOW).unwrap();
+    assert!(v.leaf.may_revoke, "the root grants it explicitly, the way it grants `admin`");
+
+    // A delegate issuing it is the account takeover the field exists to prevent: whoever may revoke may unpair every
+    // other device, and `may_pair` creates things NARROWER than itself while revoking acts on a peer.
+    let delegate = issue_ok(&root, &CertSpec { may_pair: true, may_revoke: true, ..spec(&laptop) });
+    let leaf = issue_ok(&laptop, &CertSpec { may_revoke: true, ..spec(&phone) });
+    assert_eq!(verify_chain(&root.public(), &[leaf, delegate], NOW).unwrap_err(), ChainError::NotDelegable);
+}
+
+#[test]
+fn a_box_connector_may_never_revoke() {
+    // It relays one machine's telemetry. Nothing about that involves deciding who is still on the account.
+    let connector = id(2);
+    let spec = CertSpec { role: Role::BoxConnector, scopes: vec![], may_revoke: true, ..spec(&connector) };
+    assert_eq!(issue(&id(1), &spec).unwrap_err(), ChainError::RoleNotPermitted);
+}
+
+// ------------------------------ renewal ------------------------------
+
+#[test]
+fn a_delegate_renews_a_scope_it_could_never_have_granted() {
+    // The whole reason renewal is its own case. Without it nothing but the root can re-issue a certificate carrying
+    // `approve`, so a 90-day window reads as "produce the root device four times a year, once per powerful device".
+    let (root, laptop, phone) = (id(1), id(2), id(3));
+    let delegate = issue_ok(&root, &CertSpec { may_pair: true, not_after_ms: NOW + 9_000, ..spec(&laptop) });
+    let approver = issue_ok(&root, &CertSpec { scopes: vec![scope::APPROVE.into()], ..spec(&phone) });
+
+    // Issuing those scopes fresh is refused; renewing them is not. This delegate does not hold `approve` itself, so
+    // the refusal is `ScopeWidened`; one that did would get `NotDelegable`, which is its own test above.
+    let fresh = sign_certificate(&laptop, &CertSpec { scopes: vec![scope::APPROVE.into()], ..spec(&phone) });
+    assert_eq!(verify_chain(&root.public(), &[fresh, delegate.clone()], NOW).unwrap_err(), ChainError::ScopeWidened);
+
+    let renewed = renew(&laptop, &approver, NOW + 500, NOW + 5_000).unwrap();
+    let v = verify_chain(&root.public(), &[renewed, delegate], NOW + 1_000).unwrap();
+    assert_eq!(v.leaf.scopes, vec![scope::APPROVE.to_owned()]);
+    assert_eq!(v.principal, principal_id(&phone.public()));
+}
+
+#[test]
+fn the_predecessor_may_be_expired_because_that_is_the_point() {
+    let (root, laptop, phone) = (id(1), id(2), id(3));
+    let delegate = issue_ok(&root, &CertSpec { may_pair: true, not_after_ms: NOW + 9_000, ..spec(&laptop) });
+    let lapsed = issue_ok(&root, &CertSpec { not_before_ms: NOW - 9_000, not_after_ms: NOW - 5_000, ..spec(&phone) });
+    // Long expired, and at no point in this is it checked: a renewal exists precisely for a certificate that ran out.
+    let renewed = renew(&laptop, &lapsed, NOW - 100, NOW + 5_000).unwrap();
+    assert!(verify_chain(&root.public(), &[renewed, delegate], NOW).is_ok());
+}
+
+#[test]
+fn a_renewal_may_not_move_the_agreement_key() {
+    // The field a loose rule loses. It is where sealed commands go, so a delegate free to change it could redirect
+    // everything sealed to an approver into a key it holds, without ever holding the approver's identity key.
+    let (root, laptop, phone) = (id(1), id(2), id(3));
+    let delegate = issue_ok(&root, &CertSpec { may_pair: true, not_after_ms: NOW + 9_000, ..spec(&laptop) });
+    let approver = issue_ok(&root, &CertSpec { scopes: vec![scope::APPROVE.into()], ..spec(&phone) });
+
+    let honest = renew(&laptop, &approver, NOW, NOW + 5_000).unwrap();
+    let mut body = CertificateBody::decode(honest.body.as_slice()).unwrap();
+    body.agreement_key = [7; 32].to_vec();
+    let forged = resign(&laptop, body);
+    assert_eq!(verify_chain(&root.public(), &[forged, delegate], NOW).unwrap_err(), ChainError::BadRenewal);
+}
+
+#[test]
+fn every_other_term_has_to_be_repeated_exactly() {
+    let (root, laptop, phone) = (id(1), id(2), id(3));
+    let delegate = issue_ok(&root, &CertSpec { may_pair: true, not_after_ms: NOW + 9_000, ..spec(&laptop) });
+    let before = issue_ok(&root, &CertSpec { scopes: vec![scope::APPROVE.into()], ..spec(&phone) });
+    let honest = renew(&laptop, &before, NOW, NOW + 5_000).unwrap();
+
+    let tampered = |f: fn(&mut CertificateBody)| {
+        let mut body = CertificateBody::decode(honest.body.as_slice()).unwrap();
+        f(&mut body);
+        verify_chain(&root.public(), &[resign(&laptop, body), delegate.clone()], NOW).unwrap_err()
+    };
+    // Renaming a device is not a renewal: `label` travels unchanged like everything else.
+    assert_eq!(tampered(|b| b.label = "somebody else's phone".into()), ChainError::BadRenewal, "label");
+    assert_eq!(tampered(|b| b.scopes.push(scope::DRIVE.into())), ChainError::BadRenewal, "a scope added");
+    assert_eq!(tampered(|b| b.scopes.clear()), ChainError::BadRenewal, "a scope removed");
+    assert_eq!(tampered(|b| b.may_pair = true), ChainError::BadRenewal, "may_pair");
+    assert_eq!(tampered(|b| b.subject = id(9).public().to_vec()), ChainError::BadRenewal, "subject");
+    assert_eq!(tampered(|b| b.role = Role::Runtime as i32), ChainError::BadRenewal, "role");
+}
+
+#[test]
+fn the_predecessor_must_be_the_roots_own_signature() {
+    // Under a delegate this would be a delegate certifying its own authority, and renewals would chain into wider
+    // ones: renew something narrow, then renew THAT with more.
+    let (root, laptop, phone) = (id(1), id(2), id(3));
+    let delegate = issue_ok(&root, &CertSpec { may_pair: true, not_after_ms: NOW + 9_000, ..spec(&laptop) });
+    let by_delegate = issue_ok(&laptop, &spec(&phone));
+    let renewed = renew(&laptop, &by_delegate, NOW, NOW + 5_000).unwrap();
+    assert_eq!(verify_chain(&root.public(), &[renewed, delegate.clone()], NOW).unwrap_err(), ChainError::BadRenewal);
+
+    // And it has to SAY the root signed it. A predecessor is not in the chain, so nothing else ever compares its
+    // `issuer` against who signed it, and a body that disagrees with its own signature is not a term of anything.
+    let mut body = CertificateBody::decode(issue_ok(&root, &spec(&phone)).body.as_slice()).unwrap();
+    body.issuer = laptop.public().to_vec();
+    let renewed = renew(&laptop, &resign(&root, body), NOW, NOW + 5_000).unwrap();
+    assert_eq!(verify_chain(&root.public(), &[renewed, delegate], NOW).unwrap_err(), ChainError::BadRenewal);
+}
+
+#[test]
+fn renewals_do_not_chain() {
+    let (root, laptop, phone) = (id(1), id(2), id(3));
+    let delegate = issue_ok(&root, &CertSpec { may_pair: true, not_after_ms: NOW + 9_000, ..spec(&laptop) });
+    // The predecessor has to be root-signed, so the only renewal that could chain is one the ROOT made: anything a
+    // delegate signed is already refused for its issuer. This is that case, and it is the one this rule is for.
+    let root_renewal = renew(&root, &issue_ok(&root, &spec(&phone)), NOW, NOW + 4_000).unwrap();
+    assert_eq!(renew(&laptop, &root_renewal, NOW, NOW + 3_000).unwrap_err(), ChainError::BadRenewal);
+
+    // Built around `renew`, every other rule satisfied: root-signed predecessor, every term repeated, inside the
+    // delegate's window. Only "renewals do not chain" stands between this and a delegate renewing its own renewal.
+    let mut body = CertificateBody::decode(root_renewal.body.as_slice()).unwrap();
+    body.issuer = laptop.public().to_vec();
+    body.not_after_ms = NOW + 3_000;
+    body.renews = Some(root_renewal);
+    assert_eq!(
+        verify_chain(&root.public(), &[resign(&laptop, body), delegate], NOW).unwrap_err(),
+        ChainError::BadRenewal
+    );
+}
+
+#[test]
+fn a_renewal_cannot_outlive_the_delegate_that_signed_it() {
+    // This is what keeps the root's part in renewal to one visit per account per window rather than none: a runtime
+    // can keep every device on its allowlist alive, and not past its own certificate.
+    let (root, laptop, phone) = (id(1), id(2), id(3));
+    let delegate = issue_ok(&root, &CertSpec { may_pair: true, not_after_ms: NOW + 2_000, ..spec(&laptop) });
+    let before = issue_ok(&root, &CertSpec { scopes: vec![scope::APPROVE.into()], ..spec(&phone) });
+    let too_long = renew(&laptop, &before, NOW, NOW + 9_000).unwrap();
+    assert_eq!(verify_chain(&root.public(), &[too_long, delegate], NOW).unwrap_err(), ChainError::OutlivesIssuer);
+}
+
+#[test]
+fn a_delegate_may_not_renew_may_revoke_either() {
+    // The one field where "a renewal grants nothing new" is false. Its value IS that exactly one principal holds it,
+    // so keeping a second holder alive after the root re-placed the power is how two signers happen -- and two
+    // signers race on a monotonic per-account `version`, with the loser's revocation refused as stale.
+    let (root, laptop, phone) = (id(1), id(2), id(3));
+    let delegate = issue_ok(&root, &CertSpec { may_pair: true, not_after_ms: NOW + 9_000, ..spec(&laptop) });
+    let revoker = issue_ok(&root, &CertSpec { may_revoke: true, ..spec(&phone) });
+    let renewed = renew(&laptop, &revoker, NOW, NOW + 5_000).unwrap();
+    assert_eq!(verify_chain(&root.public(), &[renewed, delegate], NOW).unwrap_err(), ChainError::NotDelegable);
+    // The root renewing its own grant is fine: there is still only one signer.
+    let by_root = renew(&root, &revoker, NOW, NOW + 5_000).unwrap();
+    assert!(verify_chain(&root.public(), &[by_root], NOW).unwrap().leaf.may_revoke);
+}
+
+#[test]
+fn only_a_renewal_may_be_larger_than_a_certificate() {
+    // The size bound is checked before decoding, because a hello is read before its sender is authenticated. A
+    // renewal carries another whole certificate, and nothing else has any business being that big.
+    let (root, phone) = (id(1), id(2));
+    let padded = CertSpec { label: "p".repeat(MAX_LABEL_BYTES), ..spec(&phone) };
+    let before = issue_ok(&root, &padded);
+    let renewed = renew(&root, &before, NOW, NOW + 5_000).unwrap();
+    assert!(renewed.body.len() > MAX_CERT_BYTES / 4, "a renewal really is much larger than what it renews");
+    assert!(verify_chain(&root.public(), &[renewed], NOW).is_ok());
+
+    // A plain body of the same size is refused rather than measured against the renewal ceiling.
+    let mut body = CertificateBody::decode(issue_ok(&root, &padded).body.as_slice()).unwrap();
+    body.label = "p".repeat(MAX_LABEL_BYTES);
+    let mut oversized = body.encode_to_vec();
+    oversized.resize(MAX_CERT_BYTES + 1, 0);
+    assert_eq!(
+        verify_chain(&root.public(), &[Certificate { body: oversized, signature: vec![0; 64] }], NOW).unwrap_err(),
+        ChainError::Malformed
+    );
+}
+
+/// Re-sign a body a test has altered, so what is under test is the VERIFIER and not `issue`'s own refusals.
+fn resign(issuer: &Identity, body: CertificateBody) -> Certificate {
+    let body = body.encode_to_vec();
+    let signature = issuer.sign(CERT_LABEL, &body);
+    Certificate { body, signature }
 }

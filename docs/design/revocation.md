@@ -1,10 +1,11 @@
 # Proposal: revoking a device, once it already holds keys
 
-**Status: proposed, nothing built, and now fully specified.** The five questions below are all answered: the four
-in Decided, and where the account root key lives, which decided that the runtime holds a never-delegable
-`may_revoke` rather than the root itself. Two things follow that are changes to shipped code rather than to this
-proposal, and they are the first work here: `version` as a timestamp, and renewal as its own case in
-`verify_chain`. The argument this continues is window-ml `tmp/hub-revocation-and-headless-pairing.md` (the UI
+**Status: the two changes to `keys` are BUILT; the lists and the rotation are not.** The five questions below are
+all answered: the four in Decided, and where the account root key lives, which decided that the runtime holds a
+never-delegable `may_revoke` rather than the root itself. `CertificateBody` now carries `may_revoke` and `renews`,
+and `verify_chain` enforces both rules (`crates/keys`, with a renewal in `vectors/seal-v1.json` so the TypeScript
+implementation is held to the same rule). `version` as a timestamp is part of the list format, which is still
+unbuilt. The argument this continues is window-ml `tmp/hub-revocation-and-headless-pairing.md` (the UI
 session's answer, worth reading for the reasoning) and [`pairing.md`](pairing.md) §Revocation, which settled the
 two halves that could not wait: every certificate now carries a bounded window, and a headless connector pairs
 through the same protocol as a phone.

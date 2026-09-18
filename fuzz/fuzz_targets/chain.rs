@@ -3,7 +3,7 @@
 #![no_main]
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
-use wmlhub_keys::{CertSpec, Identity, issue, scope, verify_chain};
+use wmlhub_keys::{CertSpec, Identity, issue, renew, scope, verify_chain};
 use wmlhub_proto::v1::{Certificate, Role};
 
 /// `issue`, which now refuses a spec every verifier would reject.
@@ -28,6 +28,7 @@ fuzz_target!(|data: &[u8]| {
     // structured: build a valid chain, flip one byte, expect refusal
     let Ok(seeds) = <[u8; 3]>::arbitrary(&mut u) else { return };
     let Ok(delegate) = bool::arbitrary(&mut u) else { return };
+    let Ok(renewal) = bool::arbitrary(&mut u) else { return };
     let Ok(flip_cert) = u8::arbitrary(&mut u) else { return };
     let Ok(flip_at) = u16::arbitrary(&mut u) else { return };
     let Ok(flip_bit) = u8::arbitrary(&mut u) else { return };
@@ -46,14 +47,22 @@ fuzz_target!(|data: &[u8]| {
         role: Role::Client,
         scopes: vec![scope::VIEW.into()],
         may_pair,
+        may_revoke: false,
         not_before_ms: now - 3_600_000,
         not_after_ms: now + 3_600_000,
         label: String::new(),
     };
-    let mut chain = if delegate {
-        vec![issue_ok(&mid, &spec(&leaf, false)), issue_ok(&root, &spec(&mid, true))]
-    } else {
-        vec![issue_ok(&root, &spec(&leaf, false))]
+    // A RENEWAL carries the certificate it renews, so its body holds a whole second body that is decoded, verified
+    // under the root and compared field for field. That is the deepest structure verification walks, and it is
+    // reached only through this arm: arbitrary bytes will not build one.
+    let mut chain = match (delegate, renewal) {
+        (_, true) => {
+            let before = issue_ok(&root, &spec(&leaf, false));
+            let renewed = renew(&mid, &before, now - 1_800_000, now + 1_800_000).expect("a renewal of a root's own");
+            vec![renewed, issue_ok(&root, &spec(&mid, true))]
+        }
+        (true, false) => vec![issue_ok(&mid, &spec(&leaf, false)), issue_ok(&root, &spec(&mid, true))],
+        (false, false) => vec![issue_ok(&root, &spec(&leaf, false))],
     };
     assert!(verify_chain(&root.public(), &chain, now).is_ok(), "the unmodified chain verifies");
     let i = usize::from(flip_cert) % chain.len();

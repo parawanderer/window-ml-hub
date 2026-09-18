@@ -57,6 +57,7 @@ fn device(root: &Identity, seed: u8, role: Role) -> Device {
         role,
         scopes: vec![wmlhub_keys::scope::VIEW.into(), wmlhub_keys::scope::DRIVE.into()],
         may_pair: false,
+        may_revoke: false,
         not_before_ms: now_ms() - 3_600_000,
         not_after_ms: now_ms() + 3_600_000,
         label: format!("device {seed}"),
@@ -288,6 +289,7 @@ async fn an_expired_certificate_is_refused() {
             role: Role::Client,
             scopes: vec![],
             may_pair: false,
+            may_revoke: false,
             // a real window, in the past: expired rather than unbounded, which is what this test is about
             not_before_ms: 1,
             not_after_ms: 2,

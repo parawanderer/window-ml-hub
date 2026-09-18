@@ -71,6 +71,7 @@ impl Device {
                 role,
                 scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
                 may_pair,
+                may_revoke: false,
                 not_before_ms: now_ms() - 3_600_000,
                 not_after_ms: now_ms() + 3_600_000,
                 label: String::new(),
@@ -275,6 +276,7 @@ async fn a_new_device_pairs_through_the_hub_and_then_logs_in_with_what_it_was_gi
             role: Role::Runtime,
             scopes: Vec::new(),
             may_pair: false,
+            may_revoke: false,
             not_before_ms: now_ms() - 1000,
             not_after_ms: now_ms() + 3_600_000,
             label: offered.label.clone(),
@@ -350,6 +352,7 @@ async fn a_device_the_root_allowed_to_pair_hands_over_its_own_certificate_too() 
             role: Role::BoxConnector,
             scopes: Vec::new(),
             may_pair: false,
+            may_revoke: false,
             not_before_ms: now_ms() - 1000,
             // inside the delegate's own window: a certificate may not outlive the one that issued it
             not_after_ms: now_ms() + 1_800_000,

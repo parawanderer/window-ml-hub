@@ -77,6 +77,12 @@ else's machine.
 - **Pairing a device or runtime** is the root key (or a device holding a delegated grant) signing a **device
   certificate**: the new principal's identity key, its role, its scopes, an expiry. Done in person: the runtime shows
   a QR code or short code, the device confirms it (`RUNTIME_HUB.md` §Security 2).
+- **Renewing one is a different act**, and the difference is what lets a delegate do it. Pairing issues for a NEW
+  subject with scopes chosen then; renewal re-issues an EXISTING subject's certificate, unchanged but for its window,
+  and therefore grants nothing that was not already granted. A renewal carries the certificate it renews, verified
+  under the root, so `verify_chain` can tell the two apart; without it, nothing but the root could keep a device
+  holding `approve` alive past 90 days, once per device and scattered across the year
+  ([`revocation.md`](revocation.md)).
 - **The hub authenticates `Hello` with that chain**: the principal signs a challenge the hub sends, and presents its
   certificate. The hub verifies signatures with public keys only. It learns the account id and the principal id, which
   it sees already, and holds no secret it could leak. This replaces a separate account password or token.
@@ -187,9 +193,12 @@ session hashes), and envelope kinds. Payload padding to size buckets for session
    keys only. No separate hub password or token.
 3. **Registration is a setting**: `invite` (the default: a new account root needs an operator-issued, single-use
    invite) or `open` (any valid root, rate limited per source address). Both modes are tested.
-4. **No root key export.** Losing the account costs a re-pairing, not data, and a paper copy is a standing credential
-   that can mint a device with `approve`. Instead, the root can give a second device you own a `may_pair`
-   certificate, so losing one device is survivable; losing all of them means a new account.
+4. **No root key export, and the root does not live in a runtime.** Losing the account costs a re-pairing, not data,
+   and a paper copy is a standing credential that can mint a device with `approve`. Instead, the root can give a
+   second device you own a `may_pair` certificate, so losing one device is survivable; losing all of them means a new
+   account. Revoking is the same shape: the runtime holds a never-delegable `may_revoke` rather than the root itself,
+   because a stolen `may_revoke` can lock every device out, which the root fixes by re-pairing, while a stolen root
+   mints a device nobody can distinguish from your own for as long as the attacker keeps renewing it.
 5. **One Ed25519 signature per published envelope**, with events batched into envelopes (~100 ms). The signature
    covers the publisher's own counter, the channel and the stream key id, so a hub that replays, reorders or splices
    envelopes is caught by the client.
