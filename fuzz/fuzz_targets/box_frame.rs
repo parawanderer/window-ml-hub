@@ -27,10 +27,13 @@ fuzz_target!(|data: &[u8]| {
     };
 
     let (route, read) = route(&bytes);
-    if let Ok(decoded) = EventFrame::decode(bytes.as_slice()) {
+    // Readable is the connector's word, not prost's, and it is allowed to be the stricter of the two: prost skips an
+    // unknown proto2 group, this reader refuses one outright rather than learn to recurse. So the tags have to agree
+    // with the frame only where the reader claims to have read it.
+    if let (true, Ok(decoded)) = (read.readable, EventFrame::decode(bytes.as_slice())) {
         assert_eq!(read.kind, decoded.kind.as_deref(), "kind read from tags differs from the decoded frame");
         assert_eq!(read.has_info, decoded.info.is_some(), "info presence differs from the decoded frame");
-        assert!(read.readable, "a frame that decodes was not readable");
+        assert_eq!(read.at_ms, decoded.at_ms.map(|ms| ms as u64), "at_ms read from tags differs from the decoded frame");
     }
     // whatever it is, it goes somewhere, and anything unreadable goes to the lossless channel
     if !read.readable {
