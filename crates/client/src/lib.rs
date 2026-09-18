@@ -197,8 +197,25 @@ impl Client {
 
     /// Publish `payload` on a channel of this principal's. The hub stamps the sender, seq and epoch.
     pub async fn publish(&mut self, channel: &[u8], kind: Kind, payload: Bytes) -> Result<(), ClientError> {
-        let envelope =
-            Envelope { to: Some(To::Channel(channel.to_vec())), kind: kind as i32, payload, ..Default::default() };
+        self.publish_coalesced(channel, kind, payload, &[]).await
+    }
+
+    /// Publish with a coalesce key: on a coalesced kind, a queued envelope carrying the same key may be superseded by
+    /// this one. An empty key never coalesces, which is how a telemetry frame that must not be lost is sent.
+    pub async fn publish_coalesced(
+        &mut self,
+        channel: &[u8],
+        kind: Kind,
+        payload: Bytes,
+        coalesce: &[u8],
+    ) -> Result<(), ClientError> {
+        let envelope = Envelope {
+            to: Some(To::Channel(channel.to_vec())),
+            kind: kind as i32,
+            payload,
+            coalesce: Bytes::copy_from_slice(coalesce),
+            ..Default::default()
+        };
         self.send_frames(&[Frame { body: Some(Body::Envelope(envelope)) }]).await
     }
 

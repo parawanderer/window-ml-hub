@@ -18,6 +18,9 @@ pub const MAX_BOX_FRAME_BYTES: usize = 1 << 20;
 const FIELD_KIND: u64 = 2;
 /// `EventFrame.info`, sent only when it changed.
 const FIELD_INFO: u64 = 28;
+/// `EventFrame.at_ms`: when the event happened, on every frame including a backfilled one. What a reconnect asks to
+/// resume from, so it is read here rather than by decoding the frame.
+const FIELD_AT_MS: u64 = 30;
 
 /// The coalesce key for a sample that carries no `info`: any queued one may be superseded by a newer one.
 pub const SAMPLE_COALESCE: &[u8] = b"s";
@@ -42,6 +45,8 @@ pub struct Read<'a> {
     /// absent when the frame carries no kind, or its tags do not parse
     pub kind: Option<&'a str>,
     pub has_info: bool,
+    /// when the event happened (epoch milliseconds), absent when the frame does not carry it
+    pub at_ms: Option<u64>,
     /// false when the tags do not parse: the frame is still relayed, losslessly
     pub readable: bool,
 }
@@ -51,24 +56,28 @@ pub fn read(frame: &[u8]) -> Read<'_> {
     let mut at = 0usize;
     let mut kind = None;
     let mut has_info = false;
+    let mut at_ms = None;
     while at < frame.len() {
-        let Some((key, next)) = varint(frame, at) else { return unreadable(kind, has_info) };
+        let Some((key, next)) = varint(frame, at) else { return unreadable(kind, has_info, at_ms) };
         at = next;
         let (field, wire) = (key >> 3, key & 7);
         match wire {
             // varint
             0 => {
-                let Some((_, next)) = varint(frame, at) else { return unreadable(kind, has_info) };
+                let Some((value, next)) = varint(frame, at) else { return unreadable(kind, has_info, at_ms) };
+                if field == FIELD_AT_MS {
+                    at_ms = Some(value);
+                }
                 at = next;
             }
             // 64-bit
             1 => at = at.saturating_add(8),
             // length-delimited
             2 => {
-                let Some((len, next)) = varint(frame, at) else { return unreadable(kind, has_info) };
-                let Ok(len) = usize::try_from(len) else { return unreadable(kind, has_info) };
+                let Some((len, next)) = varint(frame, at) else { return unreadable(kind, has_info, at_ms) };
+                let Ok(len) = usize::try_from(len) else { return unreadable(kind, has_info, at_ms) };
                 let Some(end) = next.checked_add(len).filter(|end| *end <= frame.len()) else {
-                    return unreadable(kind, has_info);
+                    return unreadable(kind, has_info, at_ms);
                 };
                 match field {
                     FIELD_KIND => kind = std::str::from_utf8(&frame[next..end]).ok(),
@@ -80,17 +89,17 @@ pub fn read(frame: &[u8]) -> Read<'_> {
             // 32-bit
             5 => at = at.saturating_add(4),
             // groups (3, 4) were removed from proto3, and 6 and 7 do not exist
-            _ => return unreadable(kind, has_info),
+            _ => return unreadable(kind, has_info, at_ms),
         }
         if at > frame.len() {
-            return unreadable(kind, has_info);
+            return unreadable(kind, has_info, at_ms);
         }
     }
-    Read { kind, has_info, readable: true }
+    Read { kind, has_info, at_ms, readable: true }
 }
 
-fn unreadable(kind: Option<&str>, has_info: bool) -> Read<'_> {
-    Read { kind, has_info, readable: false }
+fn unreadable(kind: Option<&str>, has_info: bool, at_ms: Option<u64>) -> Read<'_> {
+    Read { kind, has_info, at_ms, readable: false }
 }
 
 /// Where this frame goes, and what the connector read to decide.

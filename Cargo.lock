@@ -1358,6 +1358,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "wmlhub-connector"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "tokio",
+ "wmlhub",
+ "wmlhub-box",
+ "wmlhub-client",
+ "wmlhub-frame",
+ "wmlhub-keys",
+ "wmlhub-proto",
+ "wmlhub-seal",
+]
+
+[[package]]
 name = "wmlhub-frame"
 version = "0.1.0"
 
