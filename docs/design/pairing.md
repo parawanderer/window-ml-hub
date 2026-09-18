@@ -5,7 +5,9 @@ fingerprint (`crates/keys/src/pairing.rs`), the four frames (`PairOffer`, `PairF
 hub's handling of them, and both client sides (`Pairing::offer` and `Client::pairing_offered` / `pairing_answer`).
 An end-to-end test pairs a device that has no certificate and then logs in with what it was given.
 
-What is left is whose it should be: the chat page's pairing UI, and the connector's terminal prompt. The last thing between the hub and real use: every principal needs a
+What is left is the chat page's pairing UI; the connector's terminal side is `wmlbox pair`
+(`crates/connector/src/pair.rs`), which prints the code and the fingerprint and refuses an answer that does not name
+its own keys. The last thing between the hub and real use: every principal needs a
 certificate, and nothing issues one yet. It blocks the connector's binary (roadmap step 7), the extension's connector
 (step 8), and the chat page's pairing UI, which the UI session builds against whatever this decides.
 

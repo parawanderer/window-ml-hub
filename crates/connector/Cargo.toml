@@ -8,12 +8,19 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[[bin]]
+name = "wmlbox"
+path = "src/main.rs"
+
 [dependencies]
-tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "time"] }
+clap = { version = "4", features = ["derive", "env"] }
+getrandom = "0.4"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "time"] }
 wmlhub-box = { path = "../box" }
 wmlhub-client = { path = "../client" }
 wmlhub-seal = { path = "../seal" }
 wmlhub-frame = { path = "../frame" }
+wmlhub-keys = { path = "../keys" }
 wmlhub-proto = { path = "../proto" }
 
 [dev-dependencies]
