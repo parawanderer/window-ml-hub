@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use tokio::net::TcpListener;
 use wmlhub::registry::{OpenLimits, Registration, Registry};
-use wmlhub_client::{Client, Config, Event, Pairing, StreamKey, StreamReader, seal_frame, wrap_key};
+use wmlhub_client::{Client, ClientError, Config, Event, Pairing, StreamKey, StreamReader, seal_frame, wrap_key};
 use wmlhub_keys::{CertSpec, Identity, PublicKey, issue, principal_id, scope};
 use wmlhub_proto::v1::{Certificate, Kind, Role};
 use wmlhub_seal::{AgreementKey, Recipient, Sender};
@@ -196,6 +196,35 @@ async fn an_account_drives_a_runtime_and_reads_its_stream_through_the_hub() {
     assert_eq!(result.answers, Some(nonce));
     assert_eq!(result.body, b"sent");
     assert_eq!(result.from, runtime.id());
+}
+
+#[tokio::test]
+async fn a_scope_this_client_does_not_hold_is_refused_before_anything_leaves_it() {
+    // The recipient refuses it too (`OpenError::Scope`), but it refuses after opening a command it will not answer,
+    // so a caller that only had that would wait out its own timeout and then be told the runtime did not answer --
+    // about a runtime that was never asked. A device with narrow grants meets that on every command it should not
+    // have sent.
+    let url = start("scope").await;
+    let root = Identity::from_seed([1; 32]);
+    let runtime = Device::new(&root, 2, Role::Runtime, &[]);
+    let viewer = Device::new(&root, 3, Role::Client, &[scope::VIEW]);
+
+    let mut rt = Client::connect(runtime.config(&url, root.public(), HUB)).await.unwrap();
+    let mut ph = Client::connect(viewer.config(&url, root.public(), HUB)).await.unwrap();
+    assert_eq!(ph.grants().collect::<Vec<_>>(), vec![scope::VIEW]);
+
+    let refused = ph.command(&runtime.recipient(), scope::DRIVE, b"session.send hello").await.unwrap_err();
+    assert!(matches!(&refused, ClientError::NotGranted(s) if s == scope::DRIVE), "got {refused:?}");
+
+    // And nothing reached the runtime: the next thing it hears is a command the viewer may actually send.
+    ph.command(&runtime.recipient(), scope::VIEW, b"sessions.list").await.unwrap();
+    let command = until(&mut rt, "the command", |e| match e {
+        Event::Command(opened) => Some(opened),
+        _ => None,
+    })
+    .await;
+    assert_eq!(command.scope, scope::VIEW, "the refused one was never sent");
+    assert_eq!(command.body, b"sessions.list");
 }
 
 #[tokio::test]
