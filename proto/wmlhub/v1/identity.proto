@@ -64,3 +64,29 @@ message Challenge {
   string hub = 2;
   uint64 server_time_ms = 3;
 }
+
+// ------------------------------ pairing (docs/design/pairing.md) ------------------------------
+// A new principal has keys and nothing else: it cannot log in, because logging in needs a certificate. These carry
+// two blobs between it and a device that can issue one. The hub holds them for ten minutes, reads neither, and never
+// learns the pairing code — only SHA-256 of it, so leaked slots leak nothing usable.
+
+// A principal asking to be paired, posted by the new principal itself. The hub stores it verbatim.
+message PairingOffer {
+  // the keys the person is about to confirm the fingerprint of
+  bytes identity_key = 1;
+  bytes agreement_key = 2;
+  // what it is asking to be (a runtime, a client, a box connector)
+  Role role = 3;
+  // what to call it in the pairing UI, chosen by whoever is pairing it
+  string label = 4;
+  // when it made the offer, so a UI can say how old it is
+  uint64 offered_at_ms = 5;
+}
+
+// What a device that can issue certificates puts back: a certificate for the offered keys, sealed to the agreement
+// key the offer carried, so only the principal that made the offer can read it.
+message PairingAnswer {
+  bytes sealed_certificate = 1;
+  // the account root the new principal should expect, so it can verify the chain it was given
+  bytes account_root = 2;
+}

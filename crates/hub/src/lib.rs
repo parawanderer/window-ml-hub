@@ -5,6 +5,7 @@
 //! queue, pings, and timeouts. It never looks inside `Envelope.payload`, and logs no frame contents.
 
 pub mod arrivals;
+pub mod pairing;
 pub mod registry;
 
 use std::collections::HashMap;
