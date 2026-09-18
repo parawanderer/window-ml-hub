@@ -103,6 +103,10 @@ and every result so far: [`docs/perf/README.md`](docs/perf/README.md).
 - **CI builds fuzz targets with `-D warnings`; a local `cargo fuzz run` does not.** An unused import passes locally
   and fails the fuzz job. Build them the way CI does before pushing:
   `cd fuzz && RUSTFLAGS="-D warnings" cargo +nightly fuzz build`.
+- **Two green PRs can break main between them.** CI runs each branch against ITS base, so a signature change in one
+  and a new caller in the other compile everywhere except on main, where both are. It has happened once here (#37
+  made `issue` fallible while #40 added a test that called it, and main did not build). Rebase onto main before
+  MERGING, not only before opening, and merge one at a time.
 - **tungstenite's default read buffer is 128 KiB per connection.** Leaving it cost ~110 KB per idle connection; the
   hub sets 8 KiB (`READ_BUFFER_BYTES`). Any new websocket endpoint must set it too.
 - **Never compare memory with a power-of-two payload.** macOS rounds 16,448 bytes to 20,480; a 16,384-byte payload
