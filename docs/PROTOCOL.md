@@ -122,6 +122,20 @@ contract's `epoch`/`cursor`, inside the ciphertext, are the runtime's own and su
   runtime at least that often.
 - An unknown frame body decodes as no body and is answered `Error{UNSUPPORTED}`; an unknown field is ignored.
 
+## Pairing
+
+- **A principal with no certificate may send exactly one thing**: a `PairOffer`, in place of its `Hello`. The hub
+  holds the offer under SHA-256 of a code it never sees, for ten minutes, and reads neither the offer nor the answer.
+  That socket then waits for the answer and ends; it never joins the relay.
+- **A principal that HAS a certificate** fetches the offer with `PairFetch` and leaves a certificate with
+  `PairAnswer`. Only the first answer is taken, and a code already in use cannot be offered again: two devices on one
+  slot is how a hub would pair itself rather than the device in front of the person.
+- **What stops a hub pairing itself is the person**, comparing one fingerprint of the offered keys on both screens.
+  The hub cannot mint a certificate — it never sees a signing key — but it could substitute the keys in a slot, and
+  the fingerprint is what makes that visible.
+- Pairing sockets have their own cap (`max_pairing_sockets`), because one holds its place for as long as a person
+  takes to carry a code, and that must not keep anybody from logging in.
+
 ## Registration and development mode
 
 - **Registration** decides whether an account the hub does not know may connect: `invite` (the default) needs a

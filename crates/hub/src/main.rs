@@ -77,6 +77,10 @@ struct Serve {
     /// How many of that allowance may be spent at once.
     #[arg(long, env = "WMLHUB_CONNECTION_BURST", default_value_t = wmlhub::Config::default().arrivals.burst)]
     connection_burst: u32,
+    /// Devices being paired at once. One holds its place for as long as a person takes to carry a code to another
+    /// device, so pairing has its own cap rather than sharing the one ordinary logins pass through.
+    #[arg(long, env = "WMLHUB_MAX_PAIRING_SOCKETS", default_value_t = wmlhub::Config::default().max_pairing_sockets)]
+    max_pairing_sockets: usize,
     /// Independent relay shards, each with its own lock. 0 picks four per core.
     #[arg(long, env = "WMLHUB_SHARDS", default_value_t = 0)]
     shards: usize,
@@ -197,6 +201,7 @@ async fn serve(args: Serve) -> ExitCode {
     config.limits.account_bytes_per_second = args.account_bytes_per_second;
     config.limits.account_burst_bytes = args.account_burst_bytes;
     config.max_pending_sockets = args.max_pending_sockets;
+    config.max_pairing_sockets = args.max_pairing_sockets;
     config.max_hello_bytes = args.max_hello_bytes;
     config.arrivals =
         wmlhub::arrivals::Arrivals { per_minute: args.connections_per_minute, burst: args.connection_burst };

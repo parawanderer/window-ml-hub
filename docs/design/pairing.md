@@ -1,8 +1,11 @@
 # Proposal: pairing a device, a runtime or a connector
 
-**Status: decided, being built.** The pieces that are pure — the slot store the hub keeps (`crates/hub/src/pairing.rs`)
-and the code and fingerprint a person carries and compares (`crates/keys/src/pairing.rs`) — are in. The wire, and the
-two sides that drive it, are next. The last thing between the hub and real use: every principal needs a
+**Status: built, except the two UIs that drive it.** The slot store (`crates/hub/src/pairing.rs`), the code and
+fingerprint (`crates/keys/src/pairing.rs`), the four frames (`PairOffer`, `PairFetch`, `PairAnswer`, `Paired`), the
+hub's handling of them, and both client sides (`Pairing::offer` and `Client::pairing_offered` / `pairing_answer`).
+An end-to-end test pairs a device that has no certificate and then logs in with what it was given.
+
+What is left is whose it should be: the chat page's pairing UI, and the connector's terminal prompt. The last thing between the hub and real use: every principal needs a
 certificate, and nothing issues one yet. It blocks the connector's binary (roadmap step 7), the extension's connector
 (step 8), and the chat page's pairing UI, which the UI session builds against whatever this decides.
 

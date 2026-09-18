@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use tokio::net::TcpListener;
 use wmlhub::registry::{OpenLimits, Registration, Registry};
-use wmlhub_client::{Client, Config, Event, StreamKey, StreamReader, seal_frame, wrap_key};
+use wmlhub_client::{Client, Config, Event, Pairing, StreamKey, StreamReader, seal_frame, wrap_key};
 use wmlhub_keys::{CertSpec, Identity, PublicKey, issue, principal_id, scope};
 use wmlhub_proto::v1::{Certificate, Kind, Role};
 use wmlhub_seal::{AgreementKey, Recipient, Sender};
@@ -207,4 +207,124 @@ async fn a_certificate_from_another_root_is_refused_by_the_hub() {
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
+}
+
+/// What the pairing device shows the person, from the offer the hub was holding.
+fn offered_fingerprint(offer: &[u8]) -> (String, wmlhub_proto::v1::PairingOffer) {
+    use wmlhub_proto::prost::Message;
+    let offer = wmlhub_proto::v1::PairingOffer::decode(offer).expect("an offer");
+    let identity: [u8; 32] = offer.identity_key.as_slice().try_into().expect("32 bytes");
+    let agreement: [u8; 32] = offer.agreement_key.as_slice().try_into().expect("32 bytes");
+    (wmlhub_keys::pairing::fingerprint_hex(&identity, &agreement), offer)
+}
+
+#[tokio::test]
+async fn a_new_device_pairs_through_the_hub_and_then_logs_in_with_what_it_was_given() {
+    use wmlhub_proto::prost::Message;
+    let url = start("pairing").await;
+    let root = Identity::from_seed([1; 32]);
+    // the device that can issue certificates is already paired, and is logged in
+    let phone = Device::new(&root, 3, Role::Client, &[scope::VIEW, scope::DRIVE]);
+    let mut ph = Client::connect(phone.config(&url, root.public(), HUB)).await.unwrap();
+
+    // the new device: keys, a code, and nothing else
+    let new_identity = Identity::from_seed([42; 32]);
+    let new_agreement = AgreementKey::from_seed(&[43; 32]);
+    let code = wmlhub_keys::pairing::PairingCode::generate().unwrap();
+    let offer = wmlhub_proto::v1::PairingOffer {
+        identity_key: new_identity.public().to_vec(),
+        agreement_key: new_agreement.public().to_vec(),
+        role: Role::Runtime as i32,
+        label: "the laptop".into(),
+        offered_at_ms: now_ms(),
+    }
+    .encode_to_vec();
+    let mut pairing = Pairing::offer(&url, &code.hash(), offer).await.unwrap();
+
+    // the person types the code into the phone, which fetches the offer and shows its fingerprint
+    let typed = wmlhub_keys::pairing::PairingCode::parse(&code.as_str().to_lowercase()).unwrap();
+    let fetched = ph.pairing_offered(&typed.hash()).await.unwrap();
+    let (shown, offered) = offered_fingerprint(&fetched);
+    assert_eq!(offered.label, "the laptop");
+    assert_eq!(
+        shown,
+        wmlhub_keys::pairing::fingerprint_hex(&new_identity.public(), &new_agreement.public()),
+        "what the phone shows is what the new device shows"
+    );
+
+    // the person confirms, so the phone issues a certificate and seals it to the offered key
+    let certificate = issue(
+        &root,
+        &CertSpec {
+            subject: new_identity.public(),
+            agreement_key: new_agreement.public(),
+            role: Role::Runtime,
+            scopes: Vec::new(),
+            may_pair: false,
+            not_before_ms: now_ms() - 1000,
+            not_after_ms: now_ms() + 3_600_000,
+            label: offered.label.clone(),
+        },
+    );
+    let answer = wmlhub_proto::v1::PairingAnswer {
+        sealed_certificate: certificate.encode_to_vec(),
+        account_root: root.public().to_vec(),
+    }
+    .encode_to_vec();
+    ph.pairing_answer(&typed.hash(), answer).await.unwrap();
+
+    // the new device receives it, and logs in with it like any other principal
+    let got = pairing.answer().await.unwrap();
+    let got = wmlhub_proto::v1::PairingAnswer::decode(got.as_slice()).unwrap();
+    assert_eq!(got.account_root, root.public().to_vec());
+    let certificate = Certificate::decode(got.sealed_certificate.as_slice()).unwrap();
+
+    let paired = Client::connect(Config {
+        url: url.clone(),
+        hub_name: HUB.into(),
+        identity: Identity::from_seed([42; 32]),
+        agreement: AgreementKey::from_seed(&[43; 32]),
+        chain: vec![certificate],
+        account_root: root.public(),
+        role: Role::Runtime,
+        invite: Vec::new(),
+    })
+    .await
+    .unwrap();
+    assert_eq!(paired.account(), ph.account(), "it is on the account that paired it");
+
+    // and the two can now talk
+    ph.subscribe(&paired.principal(), b"events", None).await.unwrap();
+    until(&mut ph, "the backfill", |e| matches!(e, Event::Backfilled(_)).then_some(())).await;
+}
+
+#[tokio::test]
+async fn a_pairing_code_cannot_be_taken_over_and_only_the_first_answer_is_kept() {
+    let url = start("pairing-contested").await;
+    let root = Identity::from_seed([1; 32]);
+    let phone = Device::new(&root, 3, Role::Client, &[scope::VIEW]);
+    let mut ph = Client::connect(phone.config(&url, root.public(), HUB)).await.unwrap();
+
+    let code = wmlhub_keys::pairing::PairingCode::generate().unwrap();
+    let offer = |label: &str| {
+        use wmlhub_proto::prost::Message;
+        wmlhub_proto::v1::PairingOffer {
+            identity_key: vec![1; 32],
+            agreement_key: vec![2; 32],
+            role: Role::Client as i32,
+            label: label.into(),
+            offered_at_ms: now_ms(),
+        }
+        .encode_to_vec()
+    };
+    let _held = Pairing::offer(&url, &code.hash(), offer("mine")).await.unwrap();
+    // a second device offering under the same code is refused: two devices on one slot is how a hub would pair itself
+    assert!(Pairing::offer(&url, &code.hash(), offer("theirs")).await.is_err());
+
+    ph.pairing_answer(&code.hash(), b"first".to_vec()).await.unwrap();
+    assert!(ph.pairing_answer(&code.hash(), b"second".to_vec()).await.is_err(), "only the first answer is kept");
+
+    // and a code nobody offered is simply unavailable
+    let unknown = wmlhub_keys::pairing::PairingCode::generate().unwrap();
+    assert!(ph.pairing_offered(&unknown.hash()).await.is_err());
 }
