@@ -85,7 +85,9 @@ As built (`crates/seal`, wire format `proto/wmlhub/v1/seal.proto`):
   nonce, so only an authenticated command inside its window can occupy the replay window.
 - **Replay window**: 16-byte nonces per sender, kept until two windows plus a millisecond after arrival, which is the
   last moment a command dated a window ahead could still pass the clock. It holds 65,536 and refuses when full
-  rather than forgetting a live nonce.
+  rather than forgetting a live nonce, and **each sender has its own share of it** (`MAX_REPLAY_PER_SENDER`, 4,096):
+  the window is shared by every device of an account, so without a share one noisy or hostile device would refuse
+  every other device for two windows by filling it. With one, it locks only itself out.
 - **Cost** (M4, release, one core, three rounds of 2,000; `seal_and_open_costs`): a 64 B command seals to 483 B (419 B
   of chain, signature, HPKE key and tag) in 57 us and opens in 80 us; 4 KB: 63 us and 82-84 us; 64 KB: 155-162 us and
   143-152 us. Opening is one X25519 decapsulation and two Ed25519 verifications (the certificate and the command), so
@@ -123,10 +125,20 @@ As built (`crates/seal/src/stream.rs`):
   kept for when one does not.)
 - **Counters are the publisher's own**, from 1, across rotations. A reader refuses a counter it has passed (a hub that
   replays or reorders) and reports how many were skipped, which for session events means the ring was truncated.
+- **A frame's nonce is random**, 96 bits, though the header beside it already carries a counter and a key id that a
+  nonce could be derived from for free. Random is the safer default here: a publisher that restarts, keeps its stream
+  key and resumes its counter would re-use a derived nonce on different plaintext, which is the catastrophic AES-GCM
+  failure, while a random one survives it. The collision risk it trades that for is about n^2 / 2^97 — roughly 2^-33
+  after 2^32 frames under one key, which no session's event stream reaches. Deriving one safely would need a
+  per-publisher epoch that changes whenever the counter resets, which is more mechanism than 12 bytes a frame is
+  worth.
 - **A grant** is `GrantBody { from, to, nonce, time_ms, channel, key_id, key, from_counter }`, signed under
   `"wmlhub/grant/v1"` and sealed with info `"wmlhub/keygrant/v1"`, so a command can never be opened as a grant or a
   grant as a command. It is checked exactly as a command is (chain, sender, signature, addressing, clock, replay), and
   it carries the publisher's chain: that is how a subscriber learns the key that signs the stream's frames.
+  `from_counter` is **enforced**, not advisory: a reader refuses a frame below the first counter the grant covers, so
+  a device paired this morning cannot read last night out of a ring the hub still holds. A grant's channel is bounded
+  by the relay's `max_id_bytes`, since a channel the hub would not route is a stream that cannot exist.
 - **Cost** (M4, release, three rounds of 2,000; `frame_costs`): a 512 B batch becomes a 623 B frame, sealed in 10 us
   and opened in 25 us; 8 KB: 21-22 us and 31-32 us; 64 KB: 100-105 us and 80-84 us. A frame carries 111 bytes over its
   batch.

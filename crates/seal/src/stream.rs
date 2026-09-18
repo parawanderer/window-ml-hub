@@ -28,6 +28,9 @@ pub const MAX_STREAM_FRAME_BYTES: usize = 1 << 20;
 const FRAME_NONCE_BYTES: usize = 12;
 /// Bytes of a stream key id.
 const KEY_ID_BYTES: usize = 8;
+/// The longest channel name a grant may carry, matching the relay's `max_id_bytes`: a grant naming a channel the hub
+/// would refuse to route is a grant for a stream that cannot exist.
+pub const MAX_CHANNEL_BYTES: usize = 64;
 
 const GRANT_INFO_LABEL: &[u8] = b"wmlhub/keygrant/v1\0";
 const KEY_ID_LABEL: &[u8] = b"wmlhub/streamkey-id/v1\0";
@@ -115,7 +118,8 @@ pub struct Grant {
     pub channel: Vec<u8>,
     pub key_id: [u8; KEY_ID_BYTES],
     pub key: [u8; 32],
-    /// the first counter this key covers
+    /// The first counter this key covers, and the earliest frame the holder may open under it: a device granted a key
+    /// from counter N is being given the stream from N, not the whole ring the hub still holds.
     pub from_counter: u64,
 }
 
@@ -161,6 +165,9 @@ pub fn open_grant(receiver: &mut Receiver, sender: &[u8], sealed: &[u8], now_ms:
     let body = GrantBody::decode(signed.body.as_slice()).map_err(|_| OpenError::Malformed)?;
     let key: [u8; 32] = body.key.as_slice().try_into().map_err(|_| OpenError::Malformed)?;
     let key_id: [u8; KEY_ID_BYTES] = body.key_id.as_slice().try_into().map_err(|_| OpenError::Malformed)?;
+    if body.channel.is_empty() || body.channel.len() > MAX_CHANNEL_BYTES {
+        return Err(OpenError::Malformed);
+    }
     if StreamKey::from_bytes(key).id != key_id {
         return Err(OpenError::Malformed);
     }
@@ -223,6 +230,9 @@ pub enum StreamError {
     Decrypt,
     /// a counter this reader has already passed: the hub replayed or reordered the stream
     OutOfOrder { last: u64, counter: u64 },
+    /// before the first counter the grant that carried this key covers: the ring still holds it, this device was not
+    /// given it
+    BeforeGrant { from_counter: u64, counter: u64 },
 }
 
 /// One batch, opened.
@@ -241,7 +251,8 @@ pub struct StreamReader {
     publisher: PrincipalId,
     publisher_key: PublicKey,
     channel: Vec<u8>,
-    keys: HashMap<[u8; KEY_ID_BYTES], [u8; 32]>,
+    /// each granted key, with the first counter that grant covers
+    keys: HashMap<[u8; KEY_ID_BYTES], ([u8; 32], u64)>,
     last: u64,
 }
 
@@ -266,7 +277,7 @@ impl StreamReader {
         if grant.publisher != self.publisher || grant.channel != self.channel {
             return false;
         }
-        self.keys.insert(grant.key_id, grant.key);
+        self.keys.insert(grant.key_id, (grant.key, grant.from_counter));
         true
     }
 
@@ -290,12 +301,17 @@ impl StreamReader {
         if frame.nonce.len() != FRAME_NONCE_BYTES {
             return Err(StreamError::Malformed);
         }
-        let key = *self.keys.get(&key_id).ok_or(StreamError::UnknownKey)?;
+        let &(key, from_counter) = self.keys.get(&key_id).ok_or(StreamError::UnknownKey)?;
 
         let header = header(&self.publisher, &self.channel, &key_id, frame.counter, &frame.nonce);
         let mut signed = header.clone();
         signed.extend_from_slice(&frame.ciphertext);
         verify_stream(&self.publisher_key, &signed, &frame.signature).map_err(|_| StreamError::Signature)?;
+        // Authentic, and under a key this reader holds; but a grant covers a stream from a counter, and the ring
+        // still holds what came before it.
+        if frame.counter < from_counter {
+            return Err(StreamError::BeforeGrant { from_counter, counter: frame.counter });
+        }
         if frame.counter <= self.last {
             return Err(StreamError::OutOfOrder { last: self.last, counter: frame.counter });
         }
