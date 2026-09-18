@@ -32,6 +32,11 @@ pub const MAX_CERTIFICATE_MS: u64 = 90 * 24 * 60 * 60 * 1_000;
 /// commands about it. Nothing about that involves approving anything or driving a session.
 pub const BOX_CONNECTOR_FORBIDS: [&str; 2] = [scope::APPROVE, "control"];
 
+/// Scopes only the account root may grant. Answering a run's gates, driving a machine, and administering the
+/// account's devices are things a person decides at the root, not powers a paired device passes on: a phone that may
+/// approve a click should not thereby be able to pair another phone (window-ml `docs/spec/CHAT_PAGE.md` §Pairing).
+pub const NEVER_DELEGABLE: [&str; 3] = [scope::APPROVE, "control", "admin"];
+
 /// The largest encoded certificate body accepted. Checked before decoding: a hello is read before its sender is
 /// authenticated, so nothing in it may cost more than its size allows. A body with every field at its limit is about
 /// 750 bytes.
@@ -122,7 +127,27 @@ pub struct CertSpec {
 }
 
 /// Issue a certificate for `spec`, signed by `issuer` (the account root, or a principal allowed to pair).
-pub fn issue(issuer: &Identity, spec: &CertSpec) -> Certificate {
+/// Issue a certificate, or say why not.
+///
+/// It refuses what every verifier would: a certificate is checked here for the rules that do not depend on the chain
+/// it will be presented in, so a caller learns at issuance rather than at somebody else's verifier. What it cannot
+/// see from here — that the issuer may delegate at all, that scopes only narrow — `verify_chain` does.
+pub fn issue(issuer: &Identity, spec: &CertSpec) -> Result<Certificate, ChainError> {
+    if spec.not_before_ms == 0 || spec.not_after_ms == 0 {
+        return Err(ChainError::Unbounded);
+    }
+    if spec.not_after_ms <= spec.not_before_ms || spec.not_after_ms - spec.not_before_ms > MAX_CERTIFICATE_MS {
+        return Err(ChainError::TooLong);
+    }
+    if spec.role == Role::BoxConnector
+        && (spec.may_pair || spec.scopes.iter().any(|s| BOX_CONNECTOR_FORBIDS.contains(&s.as_str())))
+    {
+        return Err(ChainError::RoleNotPermitted);
+    }
+    Ok(sign_certificate(issuer, spec))
+}
+
+pub(crate) fn sign_certificate(issuer: &Identity, spec: &CertSpec) -> Certificate {
     let body = CertificateBody {
         subject: spec.subject.to_vec(),
         agreement_key: spec.agreement_key.to_vec(),
@@ -168,6 +193,8 @@ pub enum ChainError {
     TooLong,
     /// a certificate grants its role something that role may never hold (a box connector that may pair or approve)
     RoleNotPermitted,
+    /// a delegate issued a scope only the root may grant ([`NEVER_DELEGABLE`])
+    NotDelegable,
 }
 
 /// A chain that verified: who the principal is and what its leaf certificate says.
@@ -226,6 +253,10 @@ pub fn verify_chain(root: &PublicKey, chain: &[Certificate], now_ms: u64) -> Res
             }
             if body.scopes.iter().any(|s| !p.scopes.contains(s)) {
                 return Err(ChainError::ScopeWidened);
+            }
+            // Issued by a delegate rather than by the root: the powers a person decides at the root do not travel.
+            if body.scopes.iter().any(|s| NEVER_DELEGABLE.contains(&s.as_str())) {
+                return Err(ChainError::NotDelegable);
             }
         }
     }

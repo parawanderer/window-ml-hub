@@ -18,6 +18,11 @@ use wmlhub_keys::{CertSpec, Identity, issue, principal_id, scope};
 use wmlhub_proto::v1::{Certificate, Kind, Role};
 use wmlhub_seal::{AgreementKey, ChannelKey, Recipient, Sender, StreamKey, StreamReader, wrap_key};
 
+/// `issue`, which now refuses a spec every verifier would reject.
+fn issue_ok(issuer: &Identity, spec: &CertSpec) -> Certificate {
+    issue(issuer, spec).expect("a certificate this issuer may make")
+}
+
 const HUB: &str = "hub.test";
 
 /// One frame the fake box sends, and where it must end up.
@@ -117,7 +122,7 @@ impl Device {
         let identity_seed = [seed; 32];
         let identity = Identity::from_seed(identity_seed);
         let agreement_seed = [seed.wrapping_add(90); 32];
-        let chain = vec![issue(
+        let chain = vec![issue_ok(
             root,
             &CertSpec {
                 subject: identity.public(),

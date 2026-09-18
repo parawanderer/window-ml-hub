@@ -2,6 +2,12 @@
 //! verifier that accepts a forged chain looks identical to a working one until someone forges one.
 
 use super::*;
+
+/// `issue`, for the specs a test means to be valid. The ones that are not are signed with `sign_certificate`, since
+/// the issuer now refuses what a verifier would reject.
+fn issue_ok(issuer: &Identity, spec: &CertSpec) -> Certificate {
+    issue(issuer, spec).expect("a certificate this issuer may make")
+}
 use wmlhub_proto::prost::Message;
 
 const NOW: u64 = 1_800_000_000_000;
@@ -26,7 +32,7 @@ fn spec(subject: &Identity) -> CertSpec {
 #[test]
 fn a_leaf_issued_by_the_root_verifies() {
     let (root, phone) = (id(1), id(2));
-    let v = verify_chain(&root.public(), &[issue(&root, &spec(&phone))], NOW).unwrap();
+    let v = verify_chain(&root.public(), &[issue_ok(&root, &spec(&phone))], NOW).unwrap();
     assert_eq!(v.account, account_id(&root.public()));
     assert_eq!(v.principal, principal_id(&phone.public()));
     assert_eq!(v.leaf.label, "phone");
@@ -35,22 +41,22 @@ fn a_leaf_issued_by_the_root_verifies() {
 #[test]
 fn a_leaf_issued_by_a_delegate_verifies() {
     let (root, laptop, phone) = (id(1), id(2), id(3));
-    let delegate = issue(&root, &CertSpec { may_pair: true, ..spec(&laptop) });
-    let leaf = issue(&laptop, &spec(&phone));
+    let delegate = issue_ok(&root, &CertSpec { may_pair: true, ..spec(&laptop) });
+    let leaf = issue_ok(&laptop, &spec(&phone));
     assert!(verify_chain(&root.public(), &[leaf, delegate], NOW).is_ok());
 }
 
 #[test]
 fn a_chain_to_another_root_is_refused() {
     let (root, other, phone) = (id(1), id(9), id(2));
-    let cert = issue(&other, &spec(&phone));
+    let cert = issue_ok(&other, &spec(&phone));
     assert_eq!(verify_chain(&root.public(), &[cert], NOW).unwrap_err(), ChainError::Issuer);
 }
 
 #[test]
 fn a_tampered_body_is_refused() {
     let (root, phone) = (id(1), id(2));
-    let mut cert = issue(&root, &spec(&phone));
+    let mut cert = issue_ok(&root, &spec(&phone));
     // grant APPROVE by editing the encoded body; the signature no longer covers it
     let mut body = CertificateBody::decode(cert.body.as_slice()).unwrap();
     body.scopes.push(scope::APPROVE.into());
@@ -72,7 +78,7 @@ fn command_and_hello_signatures_cannot_stand_in_for_each_other() {
 #[test]
 fn a_certificate_signature_cannot_be_used_as_a_hello_signature() {
     let (root, phone) = (id(1), id(2));
-    let cert = issue(&root, &spec(&phone));
+    let cert = issue_ok(&root, &spec(&phone));
     // the root's signature over the body, presented as the root "saying hello" with the body as transcript
     assert!(verify_hello(&root.public(), &cert.body, &cert.signature).is_err());
 }
@@ -80,24 +86,24 @@ fn a_certificate_signature_cannot_be_used_as_a_hello_signature() {
 #[test]
 fn an_intermediate_without_may_pair_is_refused() {
     let (root, laptop, phone) = (id(1), id(2), id(3));
-    let not_delegate = issue(&root, &spec(&laptop));
-    let leaf = issue(&laptop, &spec(&phone));
+    let not_delegate = issue_ok(&root, &spec(&laptop));
+    let leaf = issue_ok(&laptop, &spec(&phone));
     assert_eq!(verify_chain(&root.public(), &[leaf, not_delegate], NOW).unwrap_err(), ChainError::NotDelegated);
 }
 
 #[test]
 fn a_delegate_cannot_grant_a_scope_it_does_not_hold() {
     let (root, laptop, phone) = (id(1), id(2), id(3));
-    let delegate = issue(&root, &CertSpec { may_pair: true, ..spec(&laptop) });
-    let leaf = issue(&laptop, &CertSpec { scopes: vec![scope::VIEW.into(), scope::APPROVE.into()], ..spec(&phone) });
+    let delegate = issue_ok(&root, &CertSpec { may_pair: true, ..spec(&laptop) });
+    let leaf = issue_ok(&laptop, &CertSpec { scopes: vec![scope::VIEW.into(), scope::APPROVE.into()], ..spec(&phone) });
     assert_eq!(verify_chain(&root.public(), &[leaf, delegate], NOW).unwrap_err(), ChainError::ScopeWidened);
 }
 
 #[test]
 fn a_leaf_cannot_outlive_its_delegate() {
     let (root, laptop, phone) = (id(1), id(2), id(3));
-    let delegate = issue(&root, &CertSpec { may_pair: true, ..spec(&laptop) });
-    let longer = issue(&laptop, &CertSpec { not_after_ms: NOW + 5000, ..spec(&phone) });
+    let delegate = issue_ok(&root, &CertSpec { may_pair: true, ..spec(&laptop) });
+    let longer = issue_ok(&laptop, &CertSpec { not_after_ms: NOW + 5000, ..spec(&phone) });
     let chain = |leaf: Certificate| verify_chain(&root.public(), &[leaf, delegate.clone()], NOW);
     assert_eq!(chain(longer).unwrap_err(), ChainError::OutlivesIssuer);
 }
@@ -105,7 +111,7 @@ fn a_leaf_cannot_outlive_its_delegate() {
 #[test]
 fn expired_and_not_yet_valid_are_both_refused() {
     let (root, phone) = (id(1), id(2));
-    let cert = issue(&root, &spec(&phone));
+    let cert = issue_ok(&root, &spec(&phone));
     assert_eq!(verify_chain(&root.public(), std::slice::from_ref(&cert), NOW + 1001).unwrap_err(), ChainError::Expired);
     assert_eq!(verify_chain(&root.public(), &[cert], NOW - 1001).unwrap_err(), ChainError::Expired);
 }
@@ -115,7 +121,15 @@ fn a_certificate_must_carry_a_window_and_may_not_outlast_the_maximum() {
     // Expiry is the revocation that works with nobody online, so "valid forever" is not something a certificate can
     // say: a device that stops being renewed stops having access, however many lists were lost.
     let (root, phone) = (id(1), id(2));
-    let chain = |spec: CertSpec| verify_chain(&root.public(), &[issue(&root, &spec)], NOW);
+    // signed around the issuer, because `issue` refuses these too: what is under test here is the VERIFIER
+    let chain = |spec: CertSpec| verify_chain(&root.public(), &[sign_certificate(&root, &spec)], NOW);
+    for refused in [
+        CertSpec { not_after_ms: 0, ..spec(&phone) },
+        CertSpec { not_before_ms: 0, ..spec(&phone) },
+        CertSpec { not_after_ms: NOW + MAX_CERTIFICATE_MS + 1, ..spec(&phone) },
+    ] {
+        assert!(issue(&root, &refused).is_err(), "the issuer refuses it as well");
+    }
     assert_eq!(chain(CertSpec { not_after_ms: 0, ..spec(&phone) }).unwrap_err(), ChainError::Unbounded);
     assert_eq!(chain(CertSpec { not_before_ms: 0, ..spec(&phone) }).unwrap_err(), ChainError::Unbounded);
     assert_eq!(
@@ -139,18 +153,16 @@ fn a_box_connector_may_neither_pair_nor_approve() {
     // rather than trusted.
     let (root, connector) = (id(1), id(2));
     let as_connector = |spec: CertSpec| CertSpec { role: Role::BoxConnector, ..spec };
-    let chain = |spec: CertSpec| verify_chain(&root.public(), &[issue(&root, &spec)], NOW);
-    assert_eq!(
-        chain(as_connector(CertSpec { may_pair: true, ..spec(&connector) })).unwrap_err(),
-        ChainError::RoleNotPermitted
-    );
+    // the issuer refuses these too, so the verifier is checked on certificates signed around it
+    let chain = |spec: CertSpec| verify_chain(&root.public(), &[sign_certificate(&root, &spec)], NOW);
+    let may_pair = as_connector(CertSpec { may_pair: true, ..spec(&connector) });
+    assert!(issue(&root, &may_pair).is_err(), "the issuer refuses it as well");
+    assert_eq!(chain(may_pair).unwrap_err(), ChainError::RoleNotPermitted);
     for forbidden in BOX_CONNECTOR_FORBIDS {
         let scopes = vec![scope::VIEW.into(), forbidden.into()];
-        assert_eq!(
-            chain(as_connector(CertSpec { scopes, ..spec(&connector) })).unwrap_err(),
-            ChainError::RoleNotPermitted,
-            "{forbidden}"
-        );
+        let refused = as_connector(CertSpec { scopes, ..spec(&connector) });
+        assert!(issue(&root, &refused).is_err(), "{forbidden}: the issuer refuses it as well");
+        assert_eq!(chain(refused).unwrap_err(), ChainError::RoleNotPermitted, "{forbidden}");
     }
     // what it may hold
     let ordinary = as_connector(CertSpec { scopes: vec![scope::VIEW.into()], ..spec(&connector) });
@@ -164,23 +176,23 @@ fn a_box_connector_may_neither_pair_nor_approve() {
 fn an_empty_or_too_long_chain_is_refused() {
     let (root, a, b, c) = (id(1), id(2), id(3), id(4));
     assert_eq!(verify_chain(&root.public(), &[], NOW).unwrap_err(), ChainError::Length);
-    let d1 = issue(&root, &CertSpec { may_pair: true, ..spec(&a) });
-    let d2 = issue(&a, &CertSpec { may_pair: true, ..spec(&b) });
-    let leaf = issue(&b, &spec(&c));
+    let d1 = issue_ok(&root, &CertSpec { may_pair: true, ..spec(&a) });
+    let d2 = issue_ok(&a, &CertSpec { may_pair: true, ..spec(&b) });
+    let leaf = issue_ok(&b, &spec(&c));
     assert_eq!(verify_chain(&root.public(), &[leaf, d2, d1], NOW).unwrap_err(), ChainError::Length);
 }
 
 #[test]
 fn the_root_cannot_log_in_as_a_principal() {
     let root = id(1);
-    let cert = issue(&root, &spec(&root));
+    let cert = issue_ok(&root, &spec(&root));
     assert_eq!(verify_chain(&root.public(), &[cert], NOW).unwrap_err(), ChainError::RootAsSubject);
 }
 
 #[test]
 fn a_malformed_key_is_refused_not_a_panic() {
     let root = id(1);
-    let mut cert = issue(&root, &spec(&id(2)));
+    let mut cert = issue_ok(&root, &spec(&id(2)));
     let mut body = CertificateBody::decode(cert.body.as_slice()).unwrap();
     body.subject.truncate(31);
     cert.body = body.encode_to_vec();
@@ -225,10 +237,11 @@ fn transcript_fields_cannot_be_shifted_between_each_other() {
 fn forged_pair(delegate_scopes: Vec<String>, leaf_scopes: Vec<String>, label: &str) -> [Certificate; 2] {
     let (root, attacker, phone) = (id(1), id(2), id(3));
     let mut parent =
-        CertificateBody::decode(issue(&root, &CertSpec { may_pair: true, ..spec(&attacker) }).body.as_slice()).unwrap();
+        CertificateBody::decode(issue_ok(&root, &CertSpec { may_pair: true, ..spec(&attacker) }).body.as_slice())
+            .unwrap();
     parent.scopes = delegate_scopes;
     let delegate = Certificate { body: parent.encode_to_vec(), signature: vec![0; 64] };
-    let leaf = issue(&attacker, &CertSpec { scopes: leaf_scopes, label: label.into(), ..spec(&phone) });
+    let leaf = issue_ok(&attacker, &CertSpec { scopes: leaf_scopes, label: label.into(), ..spec(&phone) });
     [leaf, delegate]
 }
 
@@ -274,7 +287,7 @@ fn a_scope_name_outside_the_alphabet_is_refused() {
 #[test]
 fn a_certificate_body_over_the_byte_limit_is_refused() {
     let (root, phone) = (id(1), id(2));
-    let mut cert = issue(&root, &spec(&phone));
+    let mut cert = issue_ok(&root, &spec(&phone));
     // An unknown field (tag 15, length-delimited) decodes and is ignored, so only the byte limit can refuse this.
     cert.body.push(15 << 3 | 2);
     cert.body.extend_from_slice(&[0x80, 0x08]); // varint 1024
@@ -285,15 +298,36 @@ fn a_certificate_body_over_the_byte_limit_is_refused() {
 
 #[test]
 fn a_scope_name_no_runtime_knows_yet_verifies_and_attenuates() {
-    // The set is open: `control` is proposed, and a hub that has never heard of it must still accept it.
+    // The set is open: a name this hub has never heard of must still verify and attenuate. `control` is not the
+    // example any more, because it is one of the few the root alone may grant (NEVER_DELEGABLE).
     let (root, laptop, phone) = (id(1), id(2), id(3));
-    let control = || vec![scope::VIEW.to_string(), "control".to_string()];
-    let delegate = issue(&root, &CertSpec { may_pair: true, scopes: control(), ..spec(&laptop) });
-    let leaf = issue(&laptop, &CertSpec { scopes: control(), ..spec(&phone) });
+    let control = || vec![scope::VIEW.to_string(), "dictate".to_string()];
+    let delegate = issue_ok(&root, &CertSpec { may_pair: true, scopes: control(), ..spec(&laptop) });
+    let leaf = issue_ok(&laptop, &CertSpec { scopes: control(), ..spec(&phone) });
     let v = verify_chain(&root.public(), &[leaf, delegate], NOW).unwrap();
     assert_eq!(v.leaf.scopes, control());
     // and a delegate that does not hold it cannot pass it on
-    let narrow = issue(&root, &CertSpec { may_pair: true, scopes: vec![scope::VIEW.into()], ..spec(&laptop) });
-    let leaf = issue(&laptop, &CertSpec { scopes: control(), ..spec(&phone) });
+    let narrow = issue_ok(&root, &CertSpec { may_pair: true, scopes: vec![scope::VIEW.into()], ..spec(&laptop) });
+    let leaf = issue_ok(&laptop, &CertSpec { scopes: control(), ..spec(&phone) });
     assert_eq!(verify_chain(&root.public(), &[leaf, narrow], NOW).unwrap_err(), ChainError::ScopeWidened);
+}
+
+#[test]
+fn what_only_the_root_may_grant_does_not_travel_through_a_delegate() {
+    // A phone that may approve a click should not thereby be able to pair another phone, so the powers a person
+    // decides at the root are not powers a paired device passes on.
+    let (root, laptop, phone) = (id(1), id(2), id(3));
+    for never in NEVER_DELEGABLE {
+        let held = vec![scope::VIEW.into(), never.to_string()];
+        let delegate = issue_ok(&root, &CertSpec { may_pair: true, scopes: held.clone(), ..spec(&laptop) });
+        let leaf = issue_ok(&laptop, &CertSpec { scopes: held.clone(), ..spec(&phone) });
+        assert_eq!(
+            verify_chain(&root.public(), &[leaf, delegate], NOW).unwrap_err(),
+            ChainError::NotDelegable,
+            "{never}, even from a delegate that holds it"
+        );
+        // and straight from the root it is fine, which is the point
+        let direct = issue_ok(&root, &CertSpec { scopes: held, ..spec(&phone) });
+        assert!(verify_chain(&root.public(), &[direct], NOW).is_ok(), "{never} from the root");
+    }
 }

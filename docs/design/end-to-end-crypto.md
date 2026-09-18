@@ -60,9 +60,14 @@ Renewal is an ordinary sealed command: a device whose certificate is still valid
 delegate, which answers with a new certificate for the same subject key while that device is still on the runtime's
 allowlist. Nothing new on the hub, and nothing to distribute.
 
+**`approve`, `control` and `admin` are the account root's to grant**: a delegate cannot pass them on even when it
+holds them, because a phone that may approve a click should not thereby be able to pair another phone. Scopes still
+only narrow; this is the shorter list that does not travel at all.
+
 A **box connector's** certificate may never set `may_pair` or carry `approve` or `control`: it relays one machine's
 telemetry. Encoding that in the verifier beats documenting it, since an issuer that gets it wrong is then refused
-rather than trusted.
+rather than trusted — and `issue` refuses it too, so that is learned where it happened rather than on somebody
+else's machine.
 
 ### Accounts (step 5), from the same keys
 

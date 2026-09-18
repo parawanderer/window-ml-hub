@@ -21,6 +21,11 @@ use wmlhub_seal::{
 
 /// 2: every certificate carries a validity window, which the verifier now requires, so a file at version 1 fails
 /// against this implementation rather than merely being old.
+/// `issue`, which now refuses a spec every verifier would reject.
+fn issue_ok(issuer: &Identity, spec: &CertSpec) -> Certificate {
+    issue(issuer, spec).expect("a certificate this issuer may make")
+}
+
 const VERSION: u32 = 2;
 const HUB: &str = "hub.test";
 const TIME_MS: u64 = 1_800_000_000_000;
@@ -56,7 +61,7 @@ impl Who {
     fn new(root: &Identity, seed: u8, role: Role, scopes: &[&str]) -> Self {
         let identity = Identity::from_seed([seed; 32]);
         let agreement_seed = [seed.wrapping_add(1); 32];
-        let chain = vec![issue(
+        let chain = vec![issue_ok(
             root,
             &CertSpec {
                 subject: identity.public(),

@@ -13,6 +13,11 @@ use wmlhub_keys::{CertSpec, Identity, PublicKey, issue, principal_id, scope};
 use wmlhub_proto::v1::{Certificate, Kind, Role};
 use wmlhub_seal::{AgreementKey, Recipient, Sender};
 
+/// `issue`, which now refuses a spec every verifier would reject.
+fn issue_ok(issuer: &Identity, spec: &CertSpec) -> Certificate {
+    issue(issuer, spec).expect("a certificate this issuer may make")
+}
+
 const HUB: &str = "hub.test";
 const EVENTS: &[u8] = b"events-channel";
 const KEYS: &[u8] = b"keys-channel";
@@ -58,7 +63,7 @@ impl Device {
         let identity_seed = [seed; 32];
         let identity = Identity::from_seed(identity_seed);
         let agreement_seed = [seed.wrapping_add(80); 32];
-        let cert = issue(
+        let cert = issue_ok(
             root,
             &CertSpec {
                 subject: identity.public(),
@@ -262,7 +267,7 @@ async fn a_new_device_pairs_through_the_hub_and_then_logs_in_with_what_it_was_gi
     );
 
     // the person confirms, so the phone issues a certificate and seals it to the offered key
-    let certificate = issue(
+    let certificate = issue_ok(
         &root,
         &CertSpec {
             subject: new_identity.public(),

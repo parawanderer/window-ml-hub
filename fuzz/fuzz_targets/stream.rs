@@ -6,10 +6,15 @@ use std::sync::OnceLock;
 use arbitrary::{Arbitrary, Unstructured};
 use libfuzzer_sys::fuzz_target;
 use wmlhub_keys::{CertSpec, Identity, issue, principal_id, scope};
-use wmlhub_proto::v1::Role;
+use wmlhub_proto::v1::{Certificate, Role};
 use wmlhub_seal::{
     AgreementKey, Grant, Receiver, Recipient, Sender, StreamKey, StreamReader, open_grant, seal_frame, wrap_key,
 };
+
+/// `issue`, which now refuses a spec every verifier would reject.
+fn issue_ok(issuer: &Identity, spec: &CertSpec) -> Certificate {
+    issue(issuer, spec).expect("a certificate this issuer may make")
+}
 
 const NOW: u64 = 1_800_000_000_000;
 const CHANNEL: &[u8] = b"channel";
@@ -35,8 +40,8 @@ fn fixture() -> &'static Fixture {
             not_after_ms: NOW + 86_400_000,
             label: String::new(),
         };
-        let runtime_chain = vec![issue(&root, &cert(&runtime, 12, Role::Runtime))];
-        let _ = issue(&root, &cert(&phone, 13, Role::Client));
+        let runtime_chain = vec![issue_ok(&root, &cert(&runtime, 12, Role::Runtime))];
+        let _ = issue_ok(&root, &cert(&phone, 13, Role::Client));
         let publisher = Sender { identity: &runtime, chain: &runtime_chain };
         let to = Recipient {
             principal: principal_id(&phone.public()),

@@ -6,6 +6,12 @@ use libfuzzer_sys::fuzz_target;
 use wmlhub_keys::{CertSpec, Identity, issue, scope, verify_chain};
 use wmlhub_proto::v1::{Certificate, Role};
 
+/// `issue`, which now refuses a spec every verifier would reject.
+fn issue_ok(issuer: &Identity, spec: &CertSpec) -> Certificate {
+    issue(issuer, spec).expect("a certificate this issuer may make")
+}
+
+
 fuzz_target!(|data: &[u8]| {
     let mut u = Unstructured::new(data);
     let Ok(mode) = u8::arbitrary(&mut u) else { return };
@@ -45,9 +51,9 @@ fuzz_target!(|data: &[u8]| {
         label: String::new(),
     };
     let mut chain = if delegate {
-        vec![issue(&mid, &spec(&leaf, false)), issue(&root, &spec(&mid, true))]
+        vec![issue_ok(&mid, &spec(&leaf, false)), issue_ok(&root, &spec(&mid, true))]
     } else {
-        vec![issue(&root, &spec(&leaf, false))]
+        vec![issue_ok(&root, &spec(&leaf, false))]
     };
     assert!(verify_chain(&root.public(), &chain, now).is_ok(), "the unmodified chain verifies");
     let i = usize::from(flip_cert) % chain.len();
