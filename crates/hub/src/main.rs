@@ -70,13 +70,21 @@ struct Serve {
     /// The largest first message accepted, before anything in it is decoded.
     #[arg(long, env = "WMLHUB_MAX_HELLO_BYTES", default_value_t = wmlhub::Config::default().max_hello_bytes)]
     max_hello_bytes: usize,
-    /// Connections one source address may open per minute. 0 (the default) admits everything, which is right behind a
-    /// proxy, where every client shares the proxy's address; set it when the hub is exposed directly.
-    #[arg(long, env = "WMLHUB_CONNECTIONS_PER_MINUTE", default_value_t = wmlhub::Config::default().arrivals.per_minute)]
-    connections_per_minute: u32,
-    /// How many of that allowance may be spent at once.
-    #[arg(long, env = "WMLHUB_CONNECTION_BURST", default_value_t = wmlhub::Config::default().arrivals.burst)]
-    connection_burst: u32,
+    /// Connections one source address may open per minute. Unset means automatic: on (60) when --trusted-proxies
+    /// says where clients really come from, and off otherwise, because a hub cannot tell an unnamed proxy from no
+    /// proxy at all and guessing wrong puts every client of that proxy in one bucket. Set it explicitly when the
+    /// hub is exposed directly; 0 turns it off.
+    #[arg(long, env = "WMLHUB_CONNECTIONS_PER_MINUTE")]
+    connections_per_minute: Option<u32>,
+    /// How many of that allowance may be spent at once. Unset follows --connections-per-minute, at half of it.
+    #[arg(long, env = "WMLHUB_CONNECTION_BURST")]
+    connection_burst: Option<u32>,
+    /// Addresses that are proxies in front of this hub, as CIDR blocks (`10.0.0.0/8,127.0.0.1`). A forwarded address
+    /// is read only from one of these, because `X-Forwarded-For` is a header anybody can write: from anything else
+    /// it would be a way to be rate limited as somebody else. Behind Tailscale or Caddy this is what makes an
+    /// address-keyed limit mean anything (docs/SELF_HOSTING.md).
+    #[arg(long, env = "WMLHUB_TRUSTED_PROXIES", default_value = "")]
+    trusted_proxies: String,
     /// Devices being paired at once. One holds its place for as long as a person takes to carry a code to another
     /// device, so pairing has its own cap rather than sharing the one ordinary logins pass through.
     #[arg(long, env = "WMLHUB_MAX_PAIRING_SOCKETS", default_value_t = wmlhub::Config::default().max_pairing_sockets)]
@@ -114,6 +122,10 @@ enum AccountsCommand {
         state_dir: PathBuf,
     },
 }
+
+/// What an address may do when the operator has said where clients come from. A person's devices reconnecting after
+/// a network blip are a handful; a script opening sockets in a loop is thousands.
+const DEFAULT_CONNECTIONS_PER_MINUTE: u32 = 60;
 
 fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
@@ -203,8 +215,24 @@ async fn serve(args: Serve) -> ExitCode {
     config.max_pending_sockets = args.max_pending_sockets;
     config.max_pairing_sockets = args.max_pairing_sockets;
     config.max_hello_bytes = args.max_hello_bytes;
+    let proxies = match wmlhub::forwarded::Proxies::parse(&args.trusted_proxies) {
+        Ok(proxies) => proxies,
+        Err(e) => return fail(&format!("--trusted-proxies: {e}")),
+    };
+    // Naming your proxies is the operator saying what is in front of the hub, which is exactly what makes an
+    // address-keyed limit safe to turn on. Without it a hub cannot tell an unnamed proxy from no proxy at all, and
+    // the wrong guess puts every client of that proxy in one bucket.
+    let per_minute =
+        args.connections_per_minute.unwrap_or(if proxies.is_empty() { 0 } else { DEFAULT_CONNECTIONS_PER_MINUTE });
     config.arrivals =
-        wmlhub::arrivals::Arrivals { per_minute: args.connections_per_minute, burst: args.connection_burst };
+        wmlhub::arrivals::Arrivals { per_minute, burst: args.connection_burst.unwrap_or(per_minute.div_ceil(2)) };
+    if per_minute == 0 {
+        tracing::warn!(
+            "connections are not rate limited by address: name what is in front of this hub with --trusted-proxies, \
+             or set --connections-per-minute if nothing is"
+        );
+    }
+    config.trusted_proxies = proxies;
     tokio::select! {
         result = wmlhub::serve(listener, config, seed) => {
             if let Err(e) = result {

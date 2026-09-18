@@ -380,6 +380,51 @@ async fn connecting_too_often_from_one_address_is_refused_and_the_rest_still_con
     }
 }
 
+/// Connect claiming to be forwarded for `client`, the way a proxy in front of the hub would.
+async fn try_open_forwarded(url: &str, client: &str) -> Result<Ws, tokio_tungstenite::tungstenite::Error> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut request = url.into_client_request().unwrap();
+    request.headers_mut().insert("x-forwarded-for", client.parse().unwrap());
+    tokio_tungstenite::connect_async(request).await.map(|(ws, _)| ws)
+}
+
+#[tokio::test]
+async fn behind_a_named_proxy_each_client_has_its_own_allowance() {
+    // The test's own connections arrive from loopback, so loopback is the proxy here. Without this the whole test
+    // would be one address and the limit would be the one that cannot be a default.
+    let config = wmlhub::Config {
+        arrivals: wmlhub::arrivals::Arrivals { per_minute: 60, burst: 2 },
+        trusted_proxies: wmlhub::forwarded::Proxies::parse("127.0.0.1,::1").unwrap(),
+        ..Default::default()
+    };
+    let url = start(config).await;
+
+    // one client spends its own allowance and is refused, twice over what it is allowed
+    let mut held = Vec::new();
+    for _ in 0..2 {
+        held.push(try_open_forwarded(&url, "203.0.113.9").await.expect("inside its burst"));
+    }
+    assert!(try_open_forwarded(&url, "203.0.113.9").await.is_err(), "a third from that client is refused");
+
+    // another client behind the same proxy is untouched, which is the whole point
+    held.push(try_open_forwarded(&url, "198.51.100.7").await.expect("a different client, a different allowance"));
+    assert_eq!(held.len(), 3);
+}
+
+#[tokio::test]
+async fn a_forwarded_header_from_anybody_but_a_named_proxy_is_ignored() {
+    // Nothing is named as a proxy, so the header is a client's claim about itself and changes nothing: two
+    // connections claiming different clients still share the one allowance their socket really has.
+    let config =
+        wmlhub::Config { arrivals: wmlhub::arrivals::Arrivals { per_minute: 60, burst: 1 }, ..Default::default() };
+    let url = start(config).await;
+    let _held = try_open_forwarded(&url, "203.0.113.9").await.expect("the first connection");
+    assert!(
+        try_open_forwarded(&url, "198.51.100.7").await.is_err(),
+        "claiming to be somebody else is not a way to get another allowance"
+    );
+}
+
 #[tokio::test]
 async fn a_socket_that_never_says_hello_holds_a_place_only_until_it_times_out() {
     let config =
