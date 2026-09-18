@@ -15,7 +15,12 @@ stream (`src/proto/chat.proto.pin.json`); every schema here follows the same pat
 | **Chat stream** | parawanderer/ollama `slop`, `middleware/chat.proto` | window-ml | exists and pinned |
 
 **Checking pins**: `tools/check-pins.sh` compares every vendored file's git blob id with its `.pin.json` (CI runs it);
-`tools/check-pins.sh --upstream` also asks GitHub whether the pinned branch has moved on.
+`tools/check-pins.sh --upstream` also asks GitHub whether upstream has moved on.
+
+A pin answers two questions and needs two fields for them. **`branch` is where the bytes came from** and must stay
+true, which for a copy taken at a tag is that tag. **`watch` is where upstream develops**, and it is what the poll
+asks about; it defaults to `branch`, which is right when a schema is vendored from a moving branch. Polling a tag can
+never fire and would report success forever, so `--upstream` says so rather than answering yes.
 
 **Announcing a change to a schema this repository OWNS**: [`../proto/wmlhub/CHANGES.md`](../proto/wmlhub/CHANGES.md),
 and `tools/check-schema-changes.sh` refuses a pull request that touches `proto/wmlhub/` without touching it. That is
