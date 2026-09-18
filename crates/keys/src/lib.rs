@@ -32,10 +32,20 @@ pub const MAX_CERTIFICATE_MS: u64 = 90 * 24 * 60 * 60 * 1_000;
 /// commands about it. Nothing about that involves approving anything or driving a session.
 pub const BOX_CONNECTOR_FORBIDS: [&str; 2] = [scope::APPROVE, "control"];
 
-/// Scopes only the account root may grant. Answering a run's gates, driving a machine, and administering the
-/// account's devices are things a person decides at the root, not powers a paired device passes on: a phone that may
-/// approve a click should not thereby be able to pair another phone (window-ml `docs/spec/CHAT_PAGE.md` §Pairing).
-pub const NEVER_DELEGABLE: [&str; 3] = [scope::APPROVE, "control", "admin"];
+/// Scopes only the account root may grant. Answering a run's gates, driving a machine, administering the account's
+/// devices, and changing what every LATER run on a runtime may do are things a person decides at the root, not powers
+/// a paired device passes on: a phone that may approve a click should not thereby be able to pair another phone
+/// (window-ml `docs/spec/CHAT_PAGE.md` §Pairing).
+///
+/// `install` is here for a reason stronger than persistence: revocation cannot undo an install. A delegate minting it
+/// would create effects that outlive both the delegation and the delegate's own revocation, which makes it
+/// irreversible by the very mechanism meant to end it.
+///
+/// **This list is contract, and it is in no `.proto`.** window-ml's `keys.ts` holds the same list. Adding a name here
+/// alone makes the hub refuse a chain that client still accepts, with no failing test on either side, so a change
+/// lands on both in the same hour, gets a line in `proto/wmlhub/CHANGES.md`, and is safest at a moment no certificate
+/// anywhere carries the name yet.
+pub const NEVER_DELEGABLE: [&str; 4] = [scope::APPROVE, "control", "admin", scope::INSTALL];
 
 /// The largest encoded certificate body accepted. Checked before decoding: a hello is read before its sender is
 /// authenticated, so nothing in it may cost more than its size allows. A body with every field at its limit is about
@@ -60,6 +70,11 @@ pub mod scope {
     pub const APPROVE: &str = "approve";
     pub const SCREEN: &str = "screen";
     pub const DESKTOP: &str = "desktop";
+    /// Grant a runtime a capability that outlives the session: install a package, register an MCP server, change the
+    /// default sandbox mode. The test for whether something belongs here is whether it changes what a LATER run, that
+    /// nobody has started yet, is able to do. That test sets the MINIMUM: some things pass it and stay local-only
+    /// (window-ml's backend URL and API key are accepted only from its popup).
+    pub const INSTALL: &str = "install";
 }
 
 const CERT_LABEL: &[u8] = b"wmlhub/cert/v1\0";
