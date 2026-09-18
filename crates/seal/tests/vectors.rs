@@ -11,7 +11,9 @@
 use std::path::PathBuf;
 
 use serde_json::{Value, json};
-use wmlhub_keys::{CertSpec, Identity, hello_transcript, hex, issue, principal_id, scope, verify_hello};
+use wmlhub_keys::{
+    CertSpec, Identity, hello_transcript, hex, issue, principal_id, renew, scope, verify_chain, verify_hello,
+};
 use wmlhub_proto::prost::Message;
 use wmlhub_proto::v1::{Certificate, Role};
 use wmlhub_seal::{
@@ -26,7 +28,7 @@ fn issue_ok(issuer: &Identity, spec: &CertSpec) -> Certificate {
     issue(issuer, spec).expect("a certificate this issuer may make")
 }
 
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 const HUB: &str = "hub.test";
 const TIME_MS: u64 = 1_800_000_000_000;
 /// Fixed, so the vectors are the same story every time they are regenerated.
@@ -36,6 +38,9 @@ const PHONE_SEED: u8 = 33;
 const CHALLENGE_NONCE: [u8; 32] = [44; 32];
 const STREAM_KEY: [u8; 32] = [55; 32];
 const CHANNEL_KEY: [u8; 32] = [66; 32];
+/// The renewal cast: a laptop that may pair, and a phone the ROOT gave `approve` and the laptop keeps alive.
+const LAPTOP_SEED: u8 = 77;
+const APPROVER_SEED: u8 = 88;
 
 fn path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vectors/seal-v1.json")
@@ -69,6 +74,7 @@ impl Who {
                 role,
                 scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
                 may_pair: false,
+                may_revoke: false,
                 not_before_ms: TIME_MS - 86_400_000,
                 not_after_ms: TIME_MS + 86_400_000,
                 label: String::new(),
@@ -112,6 +118,46 @@ fn cast() -> (Identity, Who, Who) {
     (root, runtime, phone)
 }
 
+/// A renewal, as the vectors describe it: the laptop's own certificate, the EXPIRED one the root issued the
+/// approver, and the laptop's renewal of it. The point is that `approve` is [`NEVER_DELEGABLE`], so the laptop could
+/// not have issued the middle one and may re-issue it anyway.
+fn renewal(root: &Identity) -> (Certificate, Certificate, Certificate) {
+    let laptop = Identity::from_seed([LAPTOP_SEED; 32]);
+    let approver = Identity::from_seed([APPROVER_SEED; 32]);
+    let laptop_cert = issue_ok(
+        root,
+        &CertSpec {
+            subject: laptop.public(),
+            agreement_key: AgreementKey::from_seed(&[LAPTOP_SEED.wrapping_add(1); 32]).public(),
+            role: Role::Runtime,
+            scopes: vec![scope::VIEW.to_owned(), scope::DRIVE.to_owned()],
+            may_pair: true,
+            may_revoke: false,
+            not_before_ms: TIME_MS - 86_400_000,
+            not_after_ms: TIME_MS + 86_400_000,
+            label: "laptop".into(),
+        },
+    );
+    // Expired at TIME_MS, deliberately: a renewal exists for a certificate that ran out, and a verifier must not
+    // check the predecessor's own window.
+    let before = issue_ok(
+        root,
+        &CertSpec {
+            subject: approver.public(),
+            agreement_key: AgreementKey::from_seed(&[APPROVER_SEED.wrapping_add(1); 32]).public(),
+            role: Role::Client,
+            scopes: vec![scope::APPROVE.to_owned()],
+            may_pair: false,
+            may_revoke: false,
+            not_before_ms: TIME_MS - 86_400_000,
+            not_after_ms: TIME_MS - 3_600_000,
+            label: "phone".into(),
+        },
+    );
+    let renewed = renew(&laptop, &before, TIME_MS - 1_000, TIME_MS + 3_600_000).expect("a renewal of the root's own");
+    (laptop_cert, before, renewed)
+}
+
 #[test]
 fn the_vectors_open_with_this_implementation() {
     let raw = std::fs::read_to_string(path()).expect("vectors/seal-v1.json is checked in");
@@ -123,6 +169,19 @@ fn the_vectors_open_with_this_implementation() {
     assert_eq!(v["account"]["root_public"], hex(&root.public()));
     assert_eq!(v["principals"]["runtime"]["principal_id"], hex(&runtime.id()));
     assert_eq!(v["principals"]["phone"]["certificate"], hex(&phone.chain[0].encode_to_vec()));
+
+    // The renewal, read back from the file rather than rebuilt, so the checked-in bytes are what verifies.
+    let cert = |key: &str| {
+        Certificate::decode(unhex(v["renewal"][key].as_str().expect("hex")).as_slice()).expect("a certificate")
+    };
+    let (delegate, renewed) = (cert("delegate"), cert("renewed"));
+    let at = v["renewal"]["verify_at_ms"].as_u64().expect("a time");
+    let out = verify_chain(&root.public(), &[renewed, delegate], at).expect("the renewal verifies");
+    assert_eq!(out.leaf.scopes, vec![scope::APPROVE.to_owned()], "a scope only the root may grant");
+    assert!(
+        verify_chain(&root.public(), std::slice::from_ref(&cert("before")), at).is_err(),
+        "and the certificate it renews is expired, which is the whole point of renewing it"
+    );
 
     // a hello signature over the transcript the file records
     let transcript = hello_transcript(
@@ -178,6 +237,7 @@ fn the_vectors_open_with_this_implementation() {
 #[ignore]
 fn write_vectors() {
     let (root, runtime, phone) = cast();
+    let (laptop_cert, before, renewed) = renewal(&root);
     let account = wmlhub_keys::account_id(&root.public());
     let transcript = hello_transcript(HUB, &CHALLENGE_NONCE, &phone.id(), Role::Client, &account);
 
@@ -229,6 +289,16 @@ fn write_vectors() {
         "principals": {
             "runtime": runtime.described(RUNTIME_SEED),
             "phone": phone.described(PHONE_SEED),
+        },
+        "renewal": {
+            "what": "A delegate re-issuing a scope it could never have granted. Verify [renewed, delegate] under the account root at verify_at_ms: it holds `approve`, which only the root may grant, and the predecessor is expired.",
+            "delegate_seed": hex(&[LAPTOP_SEED; 32]),
+            "subject_seed": hex(&[APPROVER_SEED; 32]),
+            "delegate": hex(&laptop_cert.encode_to_vec()),
+            "before": hex(&before.encode_to_vec()),
+            "renewed": hex(&renewed.encode_to_vec()),
+            "verify_at_ms": TIME_MS,
+            "scopes": [scope::APPROVE],
         },
         "hello": {
             "hub": HUB,

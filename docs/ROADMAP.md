@@ -42,9 +42,10 @@ Open, found along the way:
   (`wmlbox pair`). What is left is the chat page's pairing UI, and rotation-on-unpair, which is now a proposal of
   its own ([design/revocation.md](design/revocation.md)) because `wmlbox run` made the gap concrete: a connector
   grants its stream key to any valid certificate holding `view`, so a revoked device is still granted one until its
-  certificate expires. That proposal is now fully specified, and two of its consequences land in `keys` before any
-  of it: a never-delegable `may_revoke` on `CertificateBody`, and renewal as a case `verify_chain` can tell apart
-  from pairing, without which nothing but the root can keep an `approve` device alive past 90 days.
+  certificate expires. That proposal is now fully specified, and its two consequences for `keys` are BUILT: a
+  never-delegable `may_revoke` on `CertificateBody`, and renewal as a case `verify_chain` tells apart from pairing,
+  without which nothing but the root could keep an `approve` device alive past 90 days. What is left there is the
+  revocation lists themselves and the rotation they cause.
 
 - **A first message is still READ at up to 4 MiB before it is refused.** `max_hello_bytes` (64 KiB) now refuses one
   larger than a hello could be, but tokio-tungstenite 0.30 exposes only `get_config`, so the limit a connection reads

@@ -35,7 +35,7 @@ fn fixture() -> &'static Fixture {
             agreement_key: AgreementKey::from_seed(&[seed; 32]).public(),
             role,
             scopes,
-            may_pair: false,
+            may_pair: false, may_revoke: false,
             not_before_ms: NOW - 86_400_000,
             not_after_ms: NOW + 86_400_000,
             label: String::new(),

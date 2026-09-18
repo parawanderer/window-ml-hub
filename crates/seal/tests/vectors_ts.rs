@@ -52,6 +52,7 @@ impl Who {
                 role,
                 scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
                 may_pair: false,
+                may_revoke: false,
                 not_before_ms: TIME_MS - 86_400_000,
                 not_after_ms: TIME_MS + 86_400_000,
                 label: String::new(),

@@ -41,6 +41,10 @@ pub const NEVER_DELEGABLE: [&str; 3] = [scope::APPROVE, "control", "admin"];
 /// authenticated, so nothing in it may cost more than its size allows. A body with every field at its limit is about
 /// 750 bytes.
 pub const MAX_CERT_BYTES: usize = 1024;
+/// The largest encoded body of a RENEWAL, which carries the certificate it renews: another whole body, its signature
+/// and the framing around them, on top of a body of its own. Renewals never nest ([`verify_chain`] refuses a
+/// predecessor that is itself one), so this is the ceiling rather than one step of many.
+pub const MAX_RENEWING_CERT_BYTES: usize = 2 * MAX_CERT_BYTES + 128;
 /// The most scopes one certificate may carry. Attenuation compares each against the issuer's, so this bounds that too.
 pub const MAX_SCOPES: usize = 16;
 /// The longest scope name.
@@ -120,6 +124,9 @@ pub struct CertSpec {
     pub role: Role,
     pub scopes: Vec<String>,
     pub may_pair: bool,
+    /// May sign the account's revocation lists. Only the root may grant it, and only one principal may hold it
+    /// (docs/design/revocation.md); [`verify_chain`] refuses it on anything a delegate issued.
+    pub may_revoke: bool,
     pub not_before_ms: u64,
     /// 0 means no expiry
     pub not_after_ms: u64,
@@ -140,7 +147,7 @@ pub fn issue(issuer: &Identity, spec: &CertSpec) -> Result<Certificate, ChainErr
         return Err(ChainError::TooLong);
     }
     if spec.role == Role::BoxConnector
-        && (spec.may_pair || spec.scopes.iter().any(|s| BOX_CONNECTOR_FORBIDS.contains(&s.as_str())))
+        && (spec.may_pair || spec.may_revoke || spec.scopes.iter().any(|s| BOX_CONNECTOR_FORBIDS.contains(&s.as_str())))
     {
         return Err(ChainError::RoleNotPermitted);
     }
@@ -155,13 +162,53 @@ pub(crate) fn sign_certificate(issuer: &Identity, spec: &CertSpec) -> Certificat
         role: spec.role as i32,
         scopes: spec.scopes.clone(),
         may_pair: spec.may_pair,
+        may_revoke: spec.may_revoke,
         not_before_ms: spec.not_before_ms,
         not_after_ms: spec.not_after_ms,
         label: spec.label.clone(),
+        renews: None,
     }
     .encode_to_vec();
     let signature = issuer.sign(CERT_LABEL, &body);
     Certificate { body, signature }
+}
+
+/// Renew `previous`: the same certificate with a later window, signed by `issuer`.
+///
+/// This is deliberately not `issue` with the old fields copied by the caller. Renewal is the one operation a
+/// delegate may perform for scopes it could not itself grant, and what buys that is the predecessor travelling with
+/// it, so the new body is built HERE from the old one rather than by somebody who might get a field wrong. The field
+/// that matters most is `agreement_key`: it is where sealed commands go, and a renewal free to change it could
+/// redirect everything sealed to an approver into a key the renewer holds.
+///
+/// Renaming a device is therefore not a renewal. `label` travels unchanged like everything else, and a new name is a
+/// fresh issuance by whoever may grant those scopes.
+pub fn renew(
+    issuer: &Identity,
+    previous: &Certificate,
+    not_before_ms: u64,
+    not_after_ms: u64,
+) -> Result<Certificate, ChainError> {
+    let before = decode_body(&previous.body)?;
+    if before.renews.is_some() {
+        return Err(ChainError::BadRenewal);
+    }
+    if not_before_ms == 0 || not_after_ms == 0 {
+        return Err(ChainError::Unbounded);
+    }
+    if not_after_ms <= not_before_ms || not_after_ms - not_before_ms > MAX_CERTIFICATE_MS {
+        return Err(ChainError::TooLong);
+    }
+    let body = CertificateBody {
+        issuer: issuer.public().to_vec(),
+        not_before_ms,
+        not_after_ms,
+        renews: Some(previous.clone()),
+        ..before
+    }
+    .encode_to_vec();
+    let signature = issuer.sign(CERT_LABEL, &body);
+    Ok(Certificate { body, signature })
 }
 
 /// Why a chain was refused. Deliberately coarse on the wire (the hub answers `UNAUTHENTICATED`), precise here for
@@ -193,8 +240,11 @@ pub enum ChainError {
     TooLong,
     /// a certificate grants its role something that role may never hold (a box connector that may pair or approve)
     RoleNotPermitted,
-    /// a delegate issued a scope only the root may grant ([`NEVER_DELEGABLE`])
+    /// a delegate issued a scope only the root may grant ([`NEVER_DELEGABLE`]), or `may_revoke`
     NotDelegable,
+    /// a certificate claims to RENEW one that the root did not sign, that is itself a renewal, or whose terms it
+    /// does not repeat exactly
+    BadRenewal,
 }
 
 /// A chain that verified: who the principal is and what its leaf certificate says.
@@ -244,19 +294,40 @@ pub fn verify_chain(root: &PublicKey, chain: &[Certificate], now_ms: u64) -> Res
         {
             return Err(ChainError::RoleNotPermitted);
         }
+        // A renewal re-issues what the root already granted this subject, unchanged but for its window, so it is
+        // exempt from the two rules below that keep a delegate from granting more than it holds. Verified first,
+        // because what it is exempt from depends on it being a real one.
+        let renewed = match &body.renews {
+            None => false,
+            Some(previous) => {
+                verify_renewal(root, body, previous)?;
+                true
+            }
+        };
         if let Some(p) = parent {
             if !p.may_pair {
                 return Err(ChainError::NotDelegated);
             }
+            // A renewal is bound by this too, which is what collapses the root's part in renewal to one visit per
+            // account per window (its own certificate) rather than one per device.
             if body.not_after_ms > p.not_after_ms {
                 return Err(ChainError::OutlivesIssuer);
             }
-            if body.scopes.iter().any(|s| !p.scopes.contains(s)) {
-                return Err(ChainError::ScopeWidened);
-            }
-            // Issued by a delegate rather than by the root: the powers a person decides at the root do not travel.
-            if body.scopes.iter().any(|s| NEVER_DELEGABLE.contains(&s.as_str())) {
+            // `may_revoke` is never delegated and never renewed by a delegate either. "A renewal grants nothing new"
+            // is false for this one field, because its whole value is that exactly one principal holds it: keeping a
+            // second holder alive is how two signers happen, and two signers race on a per-account monotonic
+            // `version` with the loser's revocation refused as stale (docs/design/revocation.md).
+            if body.may_revoke {
                 return Err(ChainError::NotDelegable);
+            }
+            if !renewed {
+                if body.scopes.iter().any(|s| !p.scopes.contains(s)) {
+                    return Err(ChainError::ScopeWidened);
+                }
+                // Issued by a delegate rather than by the root: the powers a person decides at the root do not travel.
+                if body.scopes.iter().any(|s| NEVER_DELEGABLE.contains(&s.as_str())) {
+                    return Err(ChainError::NotDelegable);
+                }
             }
         }
     }
@@ -334,12 +405,51 @@ fn verify(key: &PublicKey, label: &[u8], message: &[u8], signature: &[u8]) -> Re
     key.verify_strict(&signed, &signature).map_err(|_| BadSignature)
 }
 
+/// Check a certificate that claims to renew `previous`.
+///
+/// The exemption a renewal buys is from `ScopeWidened` and `NotDelegable`, which are the two rules that make
+/// delegation safe, so it is bought strictly: the predecessor has to be the ACCOUNT ROOT's own signature over
+/// exactly these terms.
+fn verify_renewal(root: &PublicKey, body: &CertificateBody, previous: &Certificate) -> Result<(), ChainError> {
+    let before = decode_body(&previous.body)?;
+    // Renewals do not chain. Without this a delegate could renew its own renewal, and the predecessor would stop
+    // being the root's word about anything.
+    if before.renews.is_some() {
+        return Err(ChainError::BadRenewal);
+    }
+    // Signed by the root and saying so. Under a delegate this would be a delegate certifying its own authority.
+    if key32(&before.issuer)? != *root {
+        return Err(ChainError::BadRenewal);
+    }
+    verify(root, CERT_LABEL, &previous.body, &previous.signature).map_err(|_| ChainError::BadRenewal)?;
+    // The predecessor's own window is NOT checked: an expired predecessor is the normal case, and is the point.
+    //
+    // Everything else must be equal, and it is compared as a WHOLE rather than field by field, so a field added to
+    // `CertificateBody` later is covered by this rule until somebody deliberately exempts it here. Scopes compare in
+    // order, which `renew` gives for free by copying them and a hand-built renewal has no reason to disturb.
+    let expected = CertificateBody {
+        issuer: body.issuer.clone(),
+        not_before_ms: body.not_before_ms,
+        not_after_ms: body.not_after_ms,
+        renews: body.renews.clone(),
+        ..before
+    };
+    if expected != *body {
+        return Err(ChainError::BadRenewal);
+    }
+    Ok(())
+}
+
 /// Decode a certificate body, refusing anything over its bounds before any of it is compared or verified.
 fn decode_body(bytes: &[u8]) -> Result<CertificateBody, ChainError> {
-    if bytes.len() > MAX_CERT_BYTES {
+    if bytes.len() > MAX_RENEWING_CERT_BYTES {
         return Err(ChainError::Malformed);
     }
     let body = CertificateBody::decode(bytes).map_err(|_| ChainError::Malformed)?;
+    // Only a renewal has any business being larger than a certificate, because only a renewal carries another one.
+    if body.renews.is_none() && bytes.len() > MAX_CERT_BYTES {
+        return Err(ChainError::Malformed);
+    }
     let name_ok = |s: &String| {
         (1..=MAX_SCOPE_BYTES).contains(&s.len())
             && s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-'))
