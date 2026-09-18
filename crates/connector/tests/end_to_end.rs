@@ -248,3 +248,66 @@ async fn a_boxs_frames_reach_a_subscriber_byte_for_byte_on_the_right_channels() 
     assert_eq!(edges, expected_edges, "every edge, in order, as the box wrote it");
     assert_eq!(samples, expected_samples, "every sample, as the box wrote it");
 }
+
+/// A box that serves one response per connection, from a script, and records what was asked for each time.
+async fn fake_box_sequence(responses: Vec<Vec<Vec<u8>>>) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/api/events", listener.local_addr().unwrap());
+    let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = asked.clone();
+    tokio::spawn(async move {
+        for frames in responses {
+            let Ok((mut socket, _)) = listener.accept().await else { return };
+            let mut request = vec![0u8; 1024];
+            let read = socket.read(&mut request).await.unwrap();
+            recorded.lock().unwrap().push(String::from_utf8_lossy(&request[..read]).into_owned());
+
+            let head = "HTTP/1.1 200 OK\r\nContent-Type: application/protobuf; delimited=varint\r\n\
+                        Transfer-Encoding: chunked\r\n\r\n";
+            socket.write_all(head.as_bytes()).await.unwrap();
+            let mut body = Vec::new();
+            for frame in &frames {
+                wmlhub_frame::write_frame(frame, wmlhub_frame::MAX_FRAME_BYTES, &mut body).unwrap();
+            }
+            socket.write_all(format!("{:x}\r\n", body.len()).as_bytes()).await.unwrap();
+            socket.write_all(&body).await.unwrap();
+            socket.write_all(b"\r\n").await.unwrap();
+            // and then the box goes away mid-stream, which is what a restart or a dropped network looks like
+            drop(socket);
+        }
+    });
+    (url, asked)
+}
+
+#[tokio::test]
+async fn a_reconnect_asks_for_what_it_missed_and_publishes_nothing_twice() {
+    let edge = Expected { kind: "gen.end", info: false, lands: Relayed::Edge { counter: 0 } };
+    let frames: Vec<Vec<u8>> = (0..5).map(|n| frame_bytes(n, &edge)).collect();
+    // the second connection replays the last two and adds two more, which is what `since` buys
+    let (box_url, asked) = fake_box_sequence(vec![frames[..3].to_vec(), frames[1..].to_vec(), Vec::new()]).await;
+    let hub_url = start_hub("reconnect").await;
+
+    let root = Identity::from_seed([15; 32]);
+    let connector = Device::new(&root, 16, Role::BoxConnector, &[]);
+    let mut client = Client::connect(connector.config(&hub_url, &root)).await.unwrap();
+
+    let channel_key = ChannelKey::from_bytes([18; 32]);
+    let channels = Channels {
+        edge: channel_key.channel("box.edges", b"mlbox").to_vec(),
+        sample: channel_key.channel("box.samples", b"mlbox").to_vec(),
+    };
+    let key = StreamKey::from_bytes([19; 32]);
+    let relay = Relay::new(connector.sender(), &key, channels);
+    let mut conn = wmlhub_connector::Connector::new(Target::parse(&box_url).unwrap(), relay);
+
+    let first = conn.pass(&mut client, &now_ms).await.unwrap();
+    assert_eq!(first.published, 3, "everything the first connection carried");
+
+    let second = conn.pass(&mut client, &now_ms).await.unwrap();
+    assert_eq!(second.published, 2, "only what was new");
+    assert_eq!(second.duplicates, 2, "the replayed frames are recognised, not republished");
+
+    let asked = asked.lock().unwrap().clone();
+    assert!(!asked[0].contains("since="), "the first connection has nothing to resume from");
+    assert!(asked[1].contains("?since="), "the second asks for the gap: {}", asked[1].lines().next().unwrap());
+}
