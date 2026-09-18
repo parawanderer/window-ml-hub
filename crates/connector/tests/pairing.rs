@@ -20,6 +20,11 @@ use wmlhub_proto::v1::{Certificate, PairedWith, PairingAnswer, PairingOffer, Rol
 use wmlhub_seal::{AgreementKey, seal_pairing_answer};
 
 const HUB: &str = "hub.test";
+
+/// `issue`, which refuses a spec every verifier would reject. Every spec here is one it may make.
+fn issue_ok(issuer: &Identity, spec: &CertSpec) -> Certificate {
+    issue(issuer, spec).expect("a certificate this issuer may make")
+}
 const CHANNEL_KEY: [u8; 32] = [33; 32];
 
 fn dir(name: &str) -> std::path::PathBuf {
@@ -54,7 +59,7 @@ impl Phone {
     fn new(root: &Identity) -> Self {
         let identity = Identity::from_seed([2; 32]);
         let agreement = AgreementKey::from_seed(&[3; 32]);
-        let chain = vec![issue(
+        let chain = vec![issue_ok(
             root,
             &CertSpec {
                 subject: identity.public(),
@@ -87,7 +92,7 @@ impl Phone {
 
     /// A certificate this phone issues, over whichever keys it is handed: the honest case passes the offered ones.
     fn issue_for(&self, subject: &Identity, agreement_key: [u8; 32]) -> Certificate {
-        issue(
+        issue_ok(
             &self.identity,
             &CertSpec {
                 subject: subject.public(),
