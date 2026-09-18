@@ -15,6 +15,11 @@ use wmlhub_keys::{CertSpec, Identity, account_id, hello_transcript, issue, princ
 use wmlhub_proto::v1::{self, Certificate, Envelope, Frame, Kind, Role, envelope::To, error::Code, frame::Body};
 use wmlhub_proto::{decode_frames, encode_frames};
 
+/// `issue`, which now refuses a spec every verifier would reject.
+fn issue_ok(issuer: &Identity, spec: &CertSpec) -> Certificate {
+    issue(issuer, spec).expect("a certificate this issuer may make")
+}
+
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 const MAX: usize = 1 << 20;
 const HUB: &str = "hub.test";
@@ -56,7 +61,7 @@ fn device(root: &Identity, seed: u8, role: Role) -> Device {
         not_after_ms: now_ms() + 3_600_000,
         label: format!("device {seed}"),
     };
-    Device { chain: vec![issue(root, &spec)], key, role }
+    Device { chain: vec![issue_ok(root, &spec)], key, role }
 }
 
 /// What a hello may be tampered with, one field at a time.
@@ -275,7 +280,7 @@ async fn an_expired_certificate_is_refused() {
     let root = Identity::from_seed([1; 32]);
     let mut dev = device(&root, 10, Role::Client);
     let key = Identity::from_seed([10; 32]);
-    dev.chain = vec![issue(
+    dev.chain = vec![issue_ok(
         &root,
         &CertSpec {
             subject: key.public(),
@@ -283,8 +288,9 @@ async fn an_expired_certificate_is_refused() {
             role: Role::Client,
             scopes: vec![],
             may_pair: false,
-            not_before_ms: 0,
-            not_after_ms: 1,
+            // a real window, in the past: expired rather than unbounded, which is what this test is about
+            not_before_ms: 1,
+            not_after_ms: 2,
             label: String::new(),
         },
     )];

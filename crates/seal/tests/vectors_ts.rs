@@ -11,8 +11,13 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 use wmlhub_keys::{CertSpec, Identity, hex, issue, principal_id, scope};
-use wmlhub_proto::v1::Role;
+use wmlhub_proto::v1::{Certificate, Role};
 use wmlhub_seal::{AgreementKey, ChannelKey, Receiver, StreamReader, open_grant};
+
+/// `issue`, which now refuses a spec every verifier would reject.
+fn issue_ok(issuer: &Identity, spec: &CertSpec) -> Certificate {
+    issue(issuer, spec).expect("a certificate this issuer may make")
+}
 
 const TIME_MS: u64 = 1_800_000_000_000;
 const ROOT_SEED: u8 = 11;
@@ -39,7 +44,7 @@ impl Who {
         let identity = Identity::from_seed([seed; 32]);
         let agreement_seed = [seed.wrapping_add(1); 32];
         // issued so the parties match the other side's, though only the keys are needed to open what it sealed
-        let _cert = issue(
+        let _cert = issue_ok(
             root,
             &CertSpec {
                 subject: identity.public(),

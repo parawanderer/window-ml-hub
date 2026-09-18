@@ -5,6 +5,11 @@ use super::*;
 use wmlhub_keys::{CertSpec, issue, scope};
 use wmlhub_proto::v1::Role;
 
+/// `issue`, which now refuses a spec every verifier would reject.
+fn issue_ok(issuer: &Identity, spec: &CertSpec) -> Certificate {
+    issue(issuer, spec).expect("a certificate this issuer may make")
+}
+
 #[path = "rfc9180_vector.rs"]
 mod rfc9180_vector;
 
@@ -35,7 +40,7 @@ impl Principal {
             not_after_ms: NOW + 3_600_000,
             label: String::new(),
         };
-        let chain = vec![issue(root, &spec)];
+        let chain = vec![issue_ok(root, &spec)];
         Self { identity, agreement_seed, chain }
     }
 
