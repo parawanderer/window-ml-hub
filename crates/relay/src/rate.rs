@@ -21,6 +21,26 @@
 /// queued frame is a queue entry and a share of a write. Without it a flood of empty frames would cost nothing.
 pub const FRAME_COST_BYTES: usize = 64;
 
+/// What admitting a connection costs the account, in the same work-bytes as everything else. A connect and the
+/// disconnect that follows it cost about 52 us of hub CPU: 49 verifying the certificate chain and the hello
+/// signature (`wmlhub-keys` `chain_and_hello_costs`), and 3 routing the welcome burst and the presence an account
+/// of eight devices sends and is sent (`connect_costs`). A delivery costs 4.7 us at [`FRAME_COST_BYTES`]
+/// (docs/perf), so a connection is worth twelve frames of work. An account may therefore spend its budget on
+/// connecting or on traffic, and either way it spends the same CPU, which is the point of one budget per account.
+///
+/// It undercharges an account at the connection cap, where the presence fan-out reaches 19 us. Verification
+/// dominates by an order of magnitude, so the flat number is worth more than a term nobody can check.
+pub const CONNECT_COST_BYTES: usize = 12 * FRAME_COST_BYTES;
+
+/// Debt above which a connection is refused rather than charged. A connect is the one piece of work that cannot be
+/// slowed down instead: there is no connection to read more slowly yet, so charging alone would leave a client that
+/// only connects and disconnects paying nothing. Above this the account is told to come back.
+///
+/// It is far above the debt ordinary traffic makes, because the failure it prevents (a flood of handshakes) and the
+/// case it must not break (a phone connecting while the runtime publishes hard) are separated by three orders of
+/// magnitude: a burst of publishing repays in milliseconds, a handshake flood holds the debt at its ceiling.
+pub const CONNECT_REFUSED_ABOVE_MS: u64 = 1_000;
+
 /// Units per byte in the balance.
 const MILLI: i128 = 1000;
 

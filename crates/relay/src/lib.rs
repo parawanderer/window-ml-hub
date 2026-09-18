@@ -22,7 +22,7 @@ use wmlhub_proto::v1::{self, Certificate, Envelope, Frame, Kind, Role, envelope:
 pub use limits::Limits;
 use queue::{Outbound, SlowConsumer};
 use rate::Bucket;
-pub use rate::FRAME_COST_BYTES;
+pub use rate::{CONNECT_COST_BYTES, CONNECT_REFUSED_ABOVE_MS, FRAME_COST_BYTES};
 use ring::Ring;
 
 /// The least time between two `Error{THROTTLED}` notices to one connection.
@@ -232,11 +232,16 @@ impl Hub {
 
     /// Admit a connection whose `Hello` the server has authenticated into `account`. On success the `Welcome` and
     /// the account's presence are queued; on failure the server sends the returned error and closes.
+    /// `now_ms` is the wall clock, which goes into `Welcome.server_time_ms`, and `mono_ms` is the server's monotonic
+    /// clock, which is the only one the work budget may see. They are separate arguments because mixing them here is
+    /// a bug this code has already had: a bucket created at a wall-clock 1.8 x 10^12 and charged at a monotonic
+    /// 5,000 never refills (rate.rs).
     pub fn connect(
         &mut self,
         account: AccountId,
         hello: &v1::Hello,
         now_ms: u64,
+        mono_ms: u64,
     ) -> Result<(ConnId, Vec<Action>), Box<Frame>> {
         let role = hello.role();
         if hello.protocol < PROTOCOL {
@@ -261,8 +266,25 @@ impl Hub {
                 return Err(Box::new(error(Code::Limit, 0, "too many connections for this account")));
             }
         }
+        // A handshake is work like any other, and the only work that cannot be slowed down instead: there is no
+        // connection to read more slowly yet. So the account pays for it out of the same budget, and an account
+        // already far enough in debt is told to come back rather than admitted.
+        let (rate, burst) = (self.limits.account_bytes_per_second, self.limits.account_burst_bytes);
+        if let Some(acct) = self.accounts.get_mut(&account) {
+            acct.rate.refill(mono_ms, rate, burst);
+            let wait = acct.rate.wait_ms(rate);
+            if wait > CONNECT_REFUSED_ABOVE_MS {
+                return Err(Box::new(error(
+                    Code::Limit,
+                    0,
+                    &format!("account over its work rate; try again in {wait} ms"),
+                )));
+            }
+        }
         // created only once every check has passed, so a refused hello leaves nothing behind
         let acct = self.accounts.entry(account.clone()).or_insert_with(Account::new);
+        acct.rate.refill(mono_ms, rate, burst);
+        acct.rate.spend(CONNECT_COST_BYTES);
 
         let id = self.next_conn;
         self.next_conn += 1;

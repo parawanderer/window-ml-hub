@@ -54,8 +54,7 @@ Open, found along the way:
   (`X-Forwarded-For`, from proxies the operator names as trusted) is what would let it be on.
 
 - ~~**No limit on how fast an account publishes.**~~ Each account has a work budget now (docs/PROTOCOL.md §Limits and
-  failure). Still unmetered: connecting and disconnecting, which cost a handshake and presence fan-out each. This is
-  the one limit that is not per account, and the address-keyed knob cannot be the default behind a proxy, so it is
-  next.
+  failure). ~~Still unmetered: connecting and disconnecting.~~ An account's handshakes are charged to that same
+  budget, so a flood of them is refused rather than merely slowed.
 
 Later: agent-to-agent (lineage, spawn grants), headless runtimes, WebTransport.
