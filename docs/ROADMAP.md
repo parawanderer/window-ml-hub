@@ -28,12 +28,16 @@ In order. Each step lands as its own PR with CI green. Design questions are answ
 7. **The box connector mode.** Schema vendored ([SCHEMAS.md](SCHEMAS.md)); relay rules in
    [design/box-connector.md](design/box-connector.md). Routing a frame by its tags, without decoding it:
    `crates/box`; reading the stream and publishing it sealed on the two channels: `crates/connector`. Next: the
-   binary, which waits on pairing.
+   binary, which waits on pairing ([design/pairing.md](design/pairing.md), proposed).
 8. **The extension's connector** in window-ml's background worker. Last, and coordinated with the chat page work,
    because both talk to `background.ts`.
 9. **Push for approvals** on a sleeping phone, carrying only "an approval is waiting".
 
 Open, found along the way:
+
+- **Pairing is unbuilt, and everything left waits on it**: the connector's binary, the extension's connector, and the
+  chat page's pairing UI. Proposed in [design/pairing.md](design/pairing.md); it adds the hub's only unauthenticated
+  write, so the bounds in it want a second reading before code.
 
 - **A websocket message before `Hello` may be as large as any other** (`max_frame_bytes * 4`, 4 MiB by default),
   across up to `max_sockets` unauthenticated sockets. The certificate inside is bounded; the message carrying it is
