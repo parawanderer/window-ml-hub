@@ -10,9 +10,13 @@ use std::time::Duration;
 use prost::Message;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::sync::{mpsc, watch};
 use wmlhub::registry::{OpenLimits, Registration, Registry};
 use wmlhub_box::schema::{EventFrame, InfoResponse};
 use wmlhub_client::{Client, Config, Event};
+use wmlhub_connector::grant::GRANT_COMMAND;
+use wmlhub_connector::run::PENDING_FRAMES;
+use wmlhub_connector::serve::Serving;
 use wmlhub_connector::{Channels, Events, Relay, Relayed, Target};
 use wmlhub_keys::{CertSpec, Identity, issue, principal_id, scope};
 use wmlhub_proto::v1::{Certificate, Kind, Role};
@@ -284,6 +288,23 @@ async fn fake_box_sequence(responses: Vec<Vec<Vec<u8>>>) -> (String, Arc<std::sy
     (url, asked)
 }
 
+/// The next event, or a panic naming what we were waiting for rather than hanging the suite.
+async fn next(client: &mut Client, what: &str) -> Event {
+    match tokio::time::timeout(Duration::from_secs(5), client.next()).await {
+        Ok(Ok(event)) => event,
+        Ok(Err(e)) => panic!("waiting for {what}: {e:?}"),
+        Err(_) => panic!("waiting for {what}: the hub went quiet"),
+    }
+}
+
+/// Everything the box side has handed over, published. The loop does this itself; a test drives it a step at a time
+/// so that each pass can be asserted on.
+async fn drain(serving: &mut Serving<'_>, client: &mut Client, frames: &mut mpsc::Receiver<Vec<u8>>) {
+    while let Ok(frame) = frames.try_recv() {
+        serving.publish(client, &frame).await.expect("published");
+    }
+}
+
 #[tokio::test]
 async fn a_reconnect_asks_for_what_it_missed_and_publishes_nothing_twice() {
     let edge = Expected { kind: "gen.end", info: false, lands: Relayed::Edge { counter: 0 } };
@@ -302,17 +323,104 @@ async fn a_reconnect_asks_for_what_it_missed_and_publishes_nothing_twice() {
         sample: channel_key.channel("box.samples", b"mlbox").to_vec(),
     };
     let key = StreamKey::from_bytes([19; 32]);
-    let relay = Relay::new(connector.sender(), &key, channels);
-    let mut conn = wmlhub_connector::Connector::new(Target::parse(&box_url).unwrap(), relay);
 
-    let first = conn.pass(&mut client, &now_ms).await.unwrap();
-    assert_eq!(first.published, 3, "everything the first connection carried");
+    let (tx, mut rx) = mpsc::channel(PENDING_FRAMES);
+    let (published_tx, published_rx) = watch::channel(None);
+    let mut conn = wmlhub_connector::Connector::new(Target::parse(&box_url).unwrap(), tx, published_rx);
+    let mut serving = Serving::new(connector.sender(), &key, channels, published_tx);
 
-    let second = conn.pass(&mut client, &now_ms).await.unwrap();
-    assert_eq!(second.published, 2, "only what was new");
-    assert_eq!(second.duplicates, 2, "the replayed frames are recognised, not republished");
+    let first = conn.pass(&now_ms).await.unwrap();
+    assert_eq!(first.forwarded, 3, "everything the first connection carried");
+    drain(&mut serving, &mut client, &mut rx).await;
+    assert_eq!(serving.counts().published, 3);
+
+    let second = conn.pass(&now_ms).await.unwrap();
+    assert_eq!(second.forwarded, 4, "the box replayed two: this side hands over what it reads, duplicates and all");
+    drain(&mut serving, &mut client, &mut rx).await;
+    assert_eq!(serving.counts().published, 5, "only what was new");
+    assert_eq!(serving.counts().duplicates, 2, "the replayed frames are recognised, not republished");
 
     let asked = asked.lock().unwrap().clone();
     assert!(!asked[0].contains("since="), "the first connection has nothing to resume from");
     assert!(asked[1].contains("?since="), "the second asks for the gap: {}", asked[1].lines().next().unwrap());
+}
+
+#[tokio::test]
+async fn a_device_that_may_view_asks_for_the_key_and_reads_the_stream() {
+    let script = script();
+    let frames: Vec<Vec<u8>> = script.iter().enumerate().map(|(n, e)| frame_bytes(n, e)).collect();
+    let edges = script.iter().filter(|e| matches!(e.lands, Relayed::Edge { .. })).count();
+    let (box_url, _box_task) = fake_box(frames).await;
+    let hub_url = start_hub("granted").await;
+
+    let root = Identity::from_seed([25; 32]);
+    let connector = Device::new(&root, 26, Role::BoxConnector, &[]);
+    let phone = Device::new(&root, 27, Role::Client, &[scope::VIEW]);
+    let mut client = Client::connect(connector.config(&hub_url, &root)).await.unwrap();
+    let mut phone_client = Client::connect(phone.config(&hub_url, &root)).await.unwrap();
+
+    // What a device knows without being told: the connector's principal, from the paired-devices list, and the
+    // account's channel key, from its own pairing. That is enough to name the channels.
+    let channel_key = ChannelKey::from_bytes([28; 32]);
+    let channels = Channels {
+        edge: channel_key.channel("box.edges", &connector.id()).to_vec(),
+        sample: channel_key.channel("box.samples", &connector.id()).to_vec(),
+    };
+    phone_client.subscribe(&connector.id(), &channels.edge, None).await.unwrap();
+    phone_client.subscribe(&connector.id(), &channels.sample, None).await.unwrap();
+    // and it has no key: the connector chose one, and nothing has handed it over
+    phone_client.command(&connector.recipient(), scope::VIEW, GRANT_COMMAND.as_bytes()).await.unwrap();
+
+    let key = StreamKey::generate().unwrap();
+    let (tx, mut rx) = mpsc::channel(PENDING_FRAMES);
+    let (published_tx, published_rx) = watch::channel(None);
+    let mut conn = wmlhub_connector::Connector::new(Target::parse(&box_url).unwrap(), tx, published_rx);
+    let mut serving = Serving::new(connector.sender(), &key, channels.clone(), published_tx);
+
+    let reading = async {
+        let mut readers: Vec<StreamReader> = Vec::new();
+        let (mut waiting, mut read) = (Vec::new(), 0usize);
+        for _ in 0..60 {
+            match next(&mut phone_client, "the key, then the stream").await {
+                // the grant: a key wrapped to this device, which arrives as an envelope no command opener wants
+                Event::Unopened { sender, payload, .. } => {
+                    let grant = phone_client.open_grant(&sender, &payload).expect("a grant for a stream");
+                    readers.push(StreamReader::new(&grant));
+                    // whatever arrived before the key did is readable now
+                    waiting.retain(|(channel, payload): &(Vec<u8>, Vec<u8>)| {
+                        match readers.iter_mut().find(|r| r.channel() == channel) {
+                            Some(reader) => {
+                                reader.open(payload).expect("the box's own bytes");
+                                read += 1;
+                                false
+                            }
+                            None => true,
+                        }
+                    });
+                }
+                Event::Published { stream, payload, .. } => {
+                    match readers.iter_mut().find(|r| r.channel() == stream.channel) {
+                        Some(reader) => {
+                            reader.open(&payload).expect("the box's own bytes");
+                            read += 1;
+                        }
+                        None => waiting.push((stream.channel, payload.to_vec())),
+                    }
+                }
+                _ => {}
+            }
+            if read >= edges {
+                return readers.len();
+            }
+        }
+        panic!("the phone read {read} of {edges} edges with {} grants", readers.len());
+    };
+
+    let granted = tokio::select! {
+        granted = reading => granted,
+        _ = conn.run(&now_ms) => unreachable!("the box side stopped"),
+        e = serving.run(&mut client, &mut rx, &now_ms) => unreachable!("the connector stopped: {e:?}"),
+    };
+    assert_eq!(granted, 2, "one grant per channel, both from asking once");
+    assert_eq!(serving.counts().granted, 1, "and the connector answered exactly one command");
 }
