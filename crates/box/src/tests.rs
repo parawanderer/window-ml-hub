@@ -112,3 +112,16 @@ fn a_length_that_runs_off_the_end_is_not_read_as_a_kind() {
     assert_eq!(read.kind, None);
     assert_eq!(route(&bytes).0, Route::Edge);
 }
+
+#[test]
+fn a_group_is_unreadable_even_though_prost_skips_it() {
+    // proto2 groups: field 87475, start (wire 3) then end (wire 4), carrying nothing. prost skips an unknown group,
+    // so this decodes; the reader refuses wire types 3 and 4 outright, so the frame is relayed losslessly instead.
+    // The two disagreeing is deliberate: a box writes proto3, and skipping a group means recursing, which this
+    // reader never does. A frame it cannot read is a question for the client, not a reason to teach it grammar.
+    let bytes = [0x9b, 0xdb, 0x2a, 0x9c, 0xdb, 0x2a];
+    EventFrame::decode(&bytes[..]).expect("prost skips an unknown group");
+    let (route, read) = route(&bytes);
+    assert!(!read.readable);
+    assert_eq!(route, Route::Edge);
+}
