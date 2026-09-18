@@ -93,6 +93,9 @@ to the account root, the scope its leaf grants, and the agreement key to wrap to
 already authenticated by the time the connector sees it. A connector that was handed a LIST of devices instead
 would be trusting whoever handed it the list, which on this design is the hub.
 
+- **A revoked device is still granted one**, until its certificate expires: a connector has no allowlist and nothing
+  tells it about a revocation. That is the concrete instance of the gap [`revocation.md`](revocation.md) proposes to
+  close, and it is stated here rather than left to be discovered.
 - **A refusal is silence.** The common refusal never reaches the connector at all: a command from a principal whose
   certificate does not grant `view` fails in `Receiver::open`, so there is nothing to answer it with. The asker
   learns it worked when the grant arrives, and that the connector is there from presence.
