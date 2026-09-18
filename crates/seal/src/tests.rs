@@ -317,7 +317,7 @@ fn a_refused_command_does_not_occupy_the_replay_window() {
 
 #[test]
 fn the_same_nonce_from_two_senders_is_two_commands() {
-    let mut w = ReplayWindow::with_capacity(4);
+    let mut w = ReplayWindow::with_capacity(4, MAX_REPLAY_PER_SENDER);
     w.admit([1; 32], [5; NONCE_BYTES], NOW).unwrap();
     w.admit([2; 32], [5; NONCE_BYTES], NOW).unwrap();
     assert_eq!(w.admit([1; 32], [5; NONCE_BYTES], NOW).unwrap_err(), OpenError::Replay);
@@ -326,7 +326,7 @@ fn the_same_nonce_from_two_senders_is_two_commands() {
 #[test]
 fn a_full_window_refuses_until_nonces_age_out_and_never_forgets_a_live_one() {
     let forget = |arrived: u64| arrived + 2 * CLOCK_WINDOW_MS + 1;
-    let mut w = ReplayWindow::with_capacity(3);
+    let mut w = ReplayWindow::with_capacity(3, MAX_REPLAY_PER_SENDER);
     for n in 0..3u8 {
         w.admit([1; 32], [n; NONCE_BYTES], NOW + u64::from(n)).unwrap();
     }
@@ -376,4 +376,37 @@ fn seal_and_open_costs() {
         let open = start.elapsed() / N;
         eprintln!("body {size} B: sealed {} B, seal {seal:?}, open {open:?}", sealed[0].len());
     }
+}
+
+#[test]
+fn one_senders_flood_cannot_refuse_another_senders_commands() {
+    // The window is shared by every device of an account. Without a per-sender share, a phone that sent its fill
+    // would refuse the runtime's commands for two windows.
+    let mut w = ReplayWindow::with_capacity(8, 2);
+    let (noisy, quiet) = ([1u8; 32], [2u8; 32]);
+    w.admit(noisy, [1; NONCE_BYTES], NOW).unwrap();
+    w.admit(noisy, [2; NONCE_BYTES], NOW).unwrap();
+    assert_eq!(w.admit(noisy, [3; NONCE_BYTES], NOW).unwrap_err(), OpenError::Busy, "it filled its own share");
+    w.admit(quiet, [1; NONCE_BYTES], NOW).unwrap();
+    w.admit(quiet, [2; NONCE_BYTES], NOW).unwrap();
+    assert_eq!(w.admit(quiet, [9; NONCE_BYTES], NOW).unwrap_err(), OpenError::Busy, "and only its own");
+}
+
+#[test]
+fn a_senders_share_is_returned_when_its_nonces_age_out() {
+    let mut w = ReplayWindow::with_capacity(8, 1);
+    let sender = [1u8; 32];
+    w.admit(sender, [1; NONCE_BYTES], NOW).unwrap();
+    assert_eq!(w.admit(sender, [2; NONCE_BYTES], NOW).unwrap_err(), OpenError::Busy);
+    let later = NOW + 2 * CLOCK_WINDOW_MS + 1;
+    w.admit(sender, [2; NONCE_BYTES], later).unwrap();
+    assert_eq!(w.admit(sender, [3; NONCE_BYTES], later).unwrap_err(), OpenError::Busy, "one at a time, still");
+}
+
+#[test]
+fn the_window_still_has_a_ceiling_across_senders() {
+    let mut w = ReplayWindow::with_capacity(2, 8);
+    w.admit([1; 32], [1; NONCE_BYTES], NOW).unwrap();
+    w.admit([2; 32], [1; NONCE_BYTES], NOW).unwrap();
+    assert_eq!(w.admit([3; 32], [1; NONCE_BYTES], NOW).unwrap_err(), OpenError::Busy);
 }

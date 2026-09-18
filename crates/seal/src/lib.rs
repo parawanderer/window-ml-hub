@@ -12,7 +12,7 @@
 //! The hub never runs any of this. What it could do to a sealed command (drop it, delay it, replay it, deliver it to
 //! the wrong principal, claim another sender) each ends in one of the refusals in [`OpenError`].
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use hpke::aead::AesGcm256;
 use hpke::kdf::HkdfSha256;
@@ -36,9 +36,13 @@ pub const MAX_SEALED_BYTES: usize = 1 << 20;
 pub const NONCE_BYTES: usize = 16;
 /// How far a command's clock may be from the recipient's, either way.
 pub const CLOCK_WINDOW_MS: u64 = 60_000;
-/// Nonces one recipient remembers at once. Past it, new commands are refused until old nonces age out: forgetting a
-/// nonce still inside its window would let that command be replayed.
+/// Nonces one recipient remembers at once, across every sender. Past it, new commands are refused until old nonces
+/// age out: forgetting a nonce still inside its window would let that command be replayed.
 pub const MAX_REPLAY_ENTRIES: usize = 65_536;
+/// Nonces one recipient remembers from ONE sender. The window is shared by every device of an account, so without a
+/// per-sender share a single noisy or hostile device could fill it and refuse every other device for two windows.
+/// With one, it locks only itself out. A few thousand commands inside two minutes is far past what a device does.
+pub const MAX_REPLAY_PER_SENDER: usize = 4_096;
 
 const SEAL_INFO_LABEL: &[u8] = b"wmlhub/seal/v1\0";
 
@@ -327,20 +331,23 @@ impl Receiver {
 /// including `now + 2 * CLOCK_WINDOW_MS`. So the nonce is forgotten only after that millisecond.
 struct ReplayWindow {
     capacity: usize,
+    per_sender: usize,
     seen: HashSet<(PrincipalId, [u8; NONCE_BYTES])>,
+    /// how many of `seen` each sender holds, so one sender's flood cannot refuse another's commands
+    held: HashMap<PrincipalId, usize>,
     /// in arrival order, with the time each may be forgotten
     order: VecDeque<(u64, (PrincipalId, [u8; NONCE_BYTES]))>,
 }
 
 impl Default for ReplayWindow {
     fn default() -> Self {
-        Self::with_capacity(MAX_REPLAY_ENTRIES)
+        Self::with_capacity(MAX_REPLAY_ENTRIES, MAX_REPLAY_PER_SENDER)
     }
 }
 
 impl ReplayWindow {
-    fn with_capacity(capacity: usize) -> Self {
-        Self { capacity, seen: HashSet::new(), order: VecDeque::new() }
+    fn with_capacity(capacity: usize, per_sender: usize) -> Self {
+        Self { capacity, per_sender, seen: HashSet::new(), held: HashMap::new(), order: VecDeque::new() }
     }
 
     fn admit(&mut self, from: PrincipalId, nonce: [u8; NONCE_BYTES], now_ms: u64) -> Result<(), OpenError> {
@@ -351,18 +358,33 @@ impl ReplayWindow {
                 break;
             }
             self.order.pop_front();
-            self.seen.remove(&key);
+            if self.seen.remove(&key) {
+                self.release(key.0);
+            }
         }
         let key = (from, nonce);
         if self.seen.contains(&key) {
             return Err(OpenError::Replay);
         }
-        if self.seen.len() >= self.capacity {
+        // This sender's own share first: a sender that has filled it is refused while everyone else is served.
+        if self.held.get(&from).is_some_and(|held| *held >= self.per_sender) || self.seen.len() >= self.capacity {
             return Err(OpenError::Busy);
         }
         self.seen.insert(key);
+        *self.held.entry(from).or_default() += 1;
         self.order.push_back((now_ms.saturating_add(2 * CLOCK_WINDOW_MS + 1), key));
         Ok(())
+    }
+
+    /// One nonce of `from` forgotten; the sender itself is forgotten when its last one is, so the map is bounded by
+    /// the senders with live nonces rather than by everyone who ever sent one.
+    fn release(&mut self, from: PrincipalId) {
+        if let Some(held) = self.held.get_mut(&from) {
+            *held -= 1;
+            if *held == 0 {
+                self.held.remove(&from);
+            }
+        }
     }
 }
 

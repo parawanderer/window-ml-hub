@@ -255,3 +255,50 @@ fn channel_names_are_keyed_so_the_hub_cannot_tell_what_they_are_for() {
     );
     assert_eq!(one.channel("events", session).len(), CHANNEL_BYTES);
 }
+
+#[test]
+fn a_frame_before_the_counter_its_grant_covers_is_refused() {
+    // A device paired this morning is granted the stream from where it joined. The ring still holds last night, and
+    // the key opens those frames, so the reader is what stops it reading them.
+    let (a, key) = (Account::new(1), StreamKey::generate().unwrap());
+    let wrapped = wrap_key(&a.runtime.sender(), &a.phone.recipient(), CHANNEL, &key, 5, NOW).unwrap();
+    let grant = open_grant(&mut a.phone_receiver(), &a.runtime.id(), &wrapped, NOW).unwrap();
+    let mut reader = StreamReader::new(&grant);
+
+    assert_eq!(
+        reader.open(&frame(&a, &key, 4, b"last night")).unwrap_err(),
+        StreamError::BeforeGrant { from_counter: 5, counter: 4 }
+    );
+    assert_eq!(reader.open(&frame(&a, &key, 5, b"since joining")).unwrap().counter, 5, "the edge is inside");
+}
+
+#[test]
+fn each_key_carries_its_own_first_counter() {
+    // A rotation grants a new key from where it begins; the old key keeps covering what it always did.
+    let (a, old) = (Account::new(1), StreamKey::generate().unwrap());
+    let new = StreamKey::generate().unwrap();
+    let mut reader = stream(&a, &old);
+    let wrapped = wrap_key(&a.runtime.sender(), &a.phone.recipient(), CHANNEL, &new, 10, NOW).unwrap();
+    reader.add_key(&open_grant(&mut a.phone_receiver(), &a.runtime.id(), &wrapped, NOW).unwrap());
+
+    assert_eq!(reader.open(&frame(&a, &old, 2, b"before")).unwrap().counter, 2, "the old key covers from 1");
+    assert!(matches!(
+        reader.open(&frame(&a, &new, 9, b"too early")).unwrap_err(),
+        StreamError::BeforeGrant { from_counter: 10, .. }
+    ));
+    assert_eq!(reader.open(&frame(&a, &new, 10, b"after")).unwrap().counter, 10);
+}
+
+#[test]
+fn a_grant_naming_a_channel_the_hub_would_not_route_is_refused() {
+    let (a, key) = (Account::new(1), StreamKey::generate().unwrap());
+    for channel in [vec![], vec![7u8; MAX_CHANNEL_BYTES + 1]] {
+        let wrapped = wrap_key(&a.runtime.sender(), &a.phone.recipient(), &channel, &key, 1, NOW).unwrap();
+        assert_eq!(
+            open_grant(&mut a.phone_receiver(), &a.runtime.id(), &wrapped, NOW).unwrap_err(),
+            OpenError::Malformed,
+            "{} bytes",
+            channel.len()
+        );
+    }
+}
