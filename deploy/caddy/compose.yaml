@@ -10,6 +10,10 @@ services:
     environment:
       WMLHUB_HUB_NAME: ${WMLHUB_HUB_NAME:?set WMLHUB_HUB_NAME in .env}
       WMLHUB_REGISTRATION: ${WMLHUB_REGISTRATION:-invite}
+      # Caddy is the only thing that reaches the hub here, and it sets X-Forwarded-For. Naming its network is what
+      # lets the hub see the real client address, which turns the per-client connection rate on. Anything else you
+      # put on this network could claim any address, so keep it to the proxy.
+      WMLHUB_TRUSTED_PROXIES: ${WMLHUB_TRUSTED_PROXIES:-172.16.0.0/12}
     volumes:
       - wmlhub-data:/data
 

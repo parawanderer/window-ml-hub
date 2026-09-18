@@ -5,6 +5,7 @@
 //! queue, pings, and timeouts. It never looks inside `Envelope.payload`, and logs no frame contents.
 
 pub mod arrivals;
+pub mod forwarded;
 pub mod pairing;
 pub mod registry;
 
@@ -73,6 +74,9 @@ pub struct Config {
     pub max_hello_bytes: usize,
     /// How often one source address may open a connection (`arrivals`).
     pub arrivals: arrivals::Arrivals,
+    /// Addresses the operator says are proxies in front of this hub. Only from one of these is a forwarded address
+    /// read, and only then does an address-keyed limit mean anything behind Tailscale or Caddy (`forwarded`).
+    pub trusted_proxies: forwarded::Proxies,
     /// Sockets waiting for a pairing answer at once. One holds its place for as long as a slot lives (minutes,
     /// because a person is carrying a code to another device), so pairing gets its own cap rather than sharing the
     /// one ordinary logins pass through: a stranger opening pairing sockets cannot keep anybody from logging in.
@@ -94,6 +98,7 @@ impl Default for Config {
             max_pending_sockets: 256,
             max_hello_bytes: 64 << 10,
             arrivals: arrivals::Arrivals::default(),
+            trusted_proxies: forwarded::Proxies::default(),
             max_pairing_sockets: 64,
             shards: 0,
         }
@@ -283,7 +288,10 @@ pub async fn serve(listener: TcpListener, config: Config, epoch_seed: u64) -> io
             tracing::warn!(%peer, "socket limit reached; refusing");
             continue;
         };
-        if !lock(&shared.arrivals).admit(peer.ip(), Instant::now()) {
+        // A connection through a proxy is gated after the handshake, once the forwarded address is known; gating it
+        // here would put every client of that proxy in one bucket, which is the whole reason this was off.
+        let proxied = shared.config.trusted_proxies.contains(peer.ip());
+        if !proxied && !lock(&shared.arrivals).admit(peer.ip(), Instant::now()) {
             tracing::debug!(%peer, "connecting too often; refusing");
             continue;
         }
@@ -294,7 +302,7 @@ pub async fn serve(listener: TcpListener, config: Config, epoch_seed: u64) -> io
         let shared = shared.clone();
         let pairing = pairing_sockets.clone();
         tokio::spawn(async move {
-            connection(shared, tcp, peer.ip(), pending_permit, pairing).await;
+            connection(shared, tcp, peer.ip(), proxied, pending_permit, pairing).await;
             drop(permit);
         });
     }
@@ -303,7 +311,8 @@ pub async fn serve(listener: TcpListener, config: Config, epoch_seed: u64) -> io
 async fn connection(
     shared: Arc<Shared>,
     tcp: TcpStream,
-    address: IpAddr,
+    peer: IpAddr,
+    proxied: bool,
     pending: tokio::sync::OwnedSemaphorePermit,
     pairing_sockets: Arc<Semaphore>,
 ) {
@@ -317,7 +326,29 @@ async fn connection(
         .max_message_size(Some(max_message))
         .max_frame_size(Some(max_message))
         .read_buffer_size(READ_BUFFER_BYTES);
-    let Ok(ws) = tokio_tungstenite::accept_async_with_config(tcp, Some(ws_config)).await else { return };
+    // The handshake is where a forwarded address can be read at all, since it arrives as an HTTP header, so a
+    // proxied connection is gated here rather than at accept: the allowance belongs to the client behind the proxy,
+    // and gating on the proxy's own address would put every one of its clients in one bucket.
+    //
+    // Refusing inside the handshake keeps the answer the same shape as the one at accept: the upgrade fails and no
+    // websocket exists, rather than a live socket being closed a moment later.
+    let mut address = peer;
+    // tungstenite's error type for a refused handshake, which this cannot make smaller
+    #[allow(clippy::result_large_err)]
+    let gate = |req: &tokio_tungstenite::tungstenite::handshake::server::Request, res| {
+        if !proxied {
+            return Ok(res);
+        }
+        let header = req.headers().get("x-forwarded-for").and_then(|v| v.to_str().ok());
+        address = forwarded::client_address(peer, header, &shared.config.trusted_proxies);
+        if lock(&shared.arrivals).admit(address, Instant::now()) {
+            Ok(res)
+        } else {
+            tracing::debug!(%address, "connecting too often; refusing");
+            Err(tokio_tungstenite::tungstenite::handshake::server::ErrorResponse::new(None))
+        }
+    };
+    let Ok(ws) = tokio_tungstenite::accept_hdr_async_with_config(tcp, gate, Some(ws_config)).await else { return };
     let (mut sink, mut stream) = ws.split();
     let max_frame = limits.max_frame_bytes;
 

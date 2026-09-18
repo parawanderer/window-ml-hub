@@ -99,9 +99,25 @@ in the `invites` directory of the data volume.
 Registration only decides who may *use* the hub's relay. It never gives anyone access to your sessions: those are
 end-to-end encrypted, and your runtimes only accept commands from devices you paired.
 
-**Behind Caddy or any other proxy**, every connection appears to come from the proxy's address, so the per-address
-limit acts as one shared limit. That is fine for `invite`; for `open`, lower `WMLHUB_OPEN_TOTAL` to what you are
-willing to admit per hour. Both limits are environment variables (`WMLHUB_OPEN_PER_ADDRESS`, `WMLHUB_OPEN_TOTAL`).
+**Behind Caddy or any other proxy**, every connection appears to come from the proxy's address, so every
+per-address limit becomes one limit shared by everybody. Tell the hub what is in front of it and it reads the real
+client address instead:
+
+```bash
+WMLHUB_TRUSTED_PROXIES=172.16.0.0/12      # the docker network Caddy is on; 127.0.0.1 if it shares the host
+```
+
+`X-Forwarded-For` is a header anybody can write, so the hub reads it **only** from an address listed here, and the
+client is the rightmost entry that is not itself listed. Without that rule the header would be a way to be rate
+limited as somebody else.
+
+Setting it also turns the connection rate on (60 a minute per client, `WMLHUB_CONNECTIONS_PER_MINUTE`), because
+naming your proxies is what makes a per-address limit mean anything. With nothing named, the hub cannot tell an
+unnamed proxy from no proxy at all, so it leaves the limit off and says so at startup; if nothing is in front of
+your hub, set the rate yourself.
+
+For `open` registration, also lower `WMLHUB_OPEN_TOTAL` to what you are willing to admit per hour
+(`WMLHUB_OPEN_PER_ADDRESS` is per client once your proxies are named).
 
 ## Backups and upgrades
 

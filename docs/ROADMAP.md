@@ -49,9 +49,11 @@ Open, found along the way:
   at cannot be lowered for the handshake and raised afterwards. What bounds it instead is `max_pending_sockets`
   (256): at most that many sockets can be holding an unauthenticated message at once. Lowering it properly needs
   either a way to change a live connection's config upstream, or our own handshake before the websocket one.
-- **An address-keyed connection rate cannot be the default while every client arrives from a proxy.**
-  `WMLHUB_CONNECTIONS_PER_MINUTE` exists and is off by default for that reason. Reading a forwarded address
-  (`X-Forwarded-For`, from proxies the operator names as trusted) is what would let it be on.
+- ~~**An address-keyed connection rate cannot be the default while every client arrives from a proxy.**~~ The hub
+  reads a forwarded address from proxies the operator names (`WMLHUB_TRUSTED_PROXIES`), and naming them turns the
+  rate on. Still open underneath it: a hello that fails verification costs a certificate verification charged to
+  nobody, since there is no account until it verifies. What bounds that is `max_pending_sockets` and, now, the
+  per-client connection rate wherever an operator has said where clients come from.
 
 - ~~**No limit on how fast an account publishes.**~~ Each account has a work budget now (docs/PROTOCOL.md §Limits and
   failure). ~~Still unmetered: connecting and disconnecting.~~ An account's handshakes are charged to that same
