@@ -17,6 +17,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use wmlhub_keys::{Identity, PublicKey, account_id, hello_transcript, principal_id, sign_hello};
+use wmlhub_proto::prost::Message as _;
 use wmlhub_proto::v1::{self, Envelope, Frame, Kind, Position, Role, StreamRef, envelope::To, frame::Body};
 use wmlhub_proto::{bytes::Bytes, decode_frames_shared, encode_frames};
 use wmlhub_seal::{
@@ -93,6 +94,9 @@ pub enum ClientError {
     /// the hub refused the handshake
     Refused(v1::Error),
     Seal(SealError),
+    /// this client's own leaf certificate does not grant the scope the command needs, so the recipient would refuse
+    /// it and there is nothing to wait for
+    NotGranted(String),
 }
 
 /// The protocol major this client speaks.
@@ -159,6 +163,8 @@ pub struct Client {
     /// frames from the last message not handed out yet
     pending: std::vec::IntoIter<Frame>,
     max_frame: usize,
+    /// the leaf's own scopes, read once: what this client may ASK for
+    grants: Vec<String>,
 }
 
 impl std::fmt::Debug for Client {
@@ -209,6 +215,13 @@ impl Client {
         let limits = welcome.limits.unwrap_or_default();
         let max_frame = limits.max_frame_bytes as usize;
         let receiver = wmlhub_seal::Receiver::new(&identity.public(), agreement, account_root);
+        // The hub verified this chain to let us in, so the leaf decodes; an empty list is the honest answer if it
+        // somehow does not, and every command is then refused here rather than sealed and ignored.
+        let grants = chain
+            .first()
+            .and_then(|leaf| v1::CertificateBody::decode(leaf.body.as_slice()).ok())
+            .map(|leaf| leaf.scopes)
+            .unwrap_or_default();
         Ok(Self {
             ws,
             identity,
@@ -219,7 +232,14 @@ impl Client {
             receiver,
             pending: Vec::new().into_iter(),
             max_frame: max_frame.max(1 << 16),
+            grants,
         })
+    }
+
+    /// What this client's own certificate lets it ask a runtime to do. A command needing anything else is refused by
+    /// [`Client::command`] before it is sealed.
+    pub fn grants(&self) -> impl Iterator<Item = &str> {
+        self.grants.iter().map(String::as_str)
     }
 
     /// This client's principal id, as the hub knows it.
@@ -311,12 +331,20 @@ impl Client {
     }
 
     /// Seal a command to `to` and send it. Returns the nonce its result will answer.
+    ///
+    /// A scope this client's own certificate does not grant is refused HERE, before anything is sealed. The
+    /// recipient would refuse it anyway ([`wmlhub_seal::OpenError::Scope`]), but it refuses after opening a command
+    /// it was never going to answer, so the caller would wait out its own timeout and then be told the runtime did
+    /// not answer -- about a runtime that was never asked. A device with narrow grants meets that constantly.
     pub async fn command(
         &mut self,
         to: &Recipient,
         scope: &str,
         body: &[u8],
     ) -> Result<[u8; wmlhub_seal::NONCE_BYTES], ClientError> {
+        if !self.grants().any(|granted| granted == scope) {
+            return Err(ClientError::NotGranted(scope.to_owned()));
+        }
         let sender = Sender { identity: &self.identity, chain: &self.chain };
         let (sealed, nonce) = seal_command(&sender, to, scope, body, now_ms()).map_err(ClientError::Seal)?;
         self.direct(to.principal, Kind::Command, sealed).await?;

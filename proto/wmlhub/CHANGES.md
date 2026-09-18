@@ -1,8 +1,13 @@
 # Changes to `wmlhub/v1`, newest first
 
 The hub owns these schemas and other repositories vendor them ([`../../docs/SCHEMAS.md`](../../docs/SCHEMAS.md)).
-From a reader's side a schema change is invisible until something needs the field, so this file is the record, and
-`tools/check-schema-changes.sh` refuses a change to `proto/wmlhub/` that does not touch it.
+From a reader's side a change is invisible until something needs it, so this file is the record, and
+`tools/check-schema-changes.sh` refuses a change that does not touch it.
+
+**It is not only the schema.** A second implementation reproduces the chain rules, the domain-separation labels, the
+bounds and the channel derivation, and none of those lives in a `.proto`: `NEVER_DELEGABLE` is a Rust constant, and
+adding a name to it means the hub refuses a chain a reader still accepts, which is a divergence with no failing
+test on either side. So `crates/keys/src/lib.rs` and `crates/seal/src/{lib,stream}.rs` are watched here too.
 
 **If you vendor these files**: pin them with a `<name>.proto.pin.json` carrying the git blob id, and run
 `tools/check-pins.sh --upstream` (20 lines of bash in this repo, copyable) on a schedule. That tells you upstream has
