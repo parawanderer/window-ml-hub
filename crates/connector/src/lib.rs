@@ -8,7 +8,9 @@
 pub mod events;
 pub mod http;
 pub mod relay;
+pub mod run;
 
 pub use events::{Events, IngestError};
 pub use http::Target;
 pub use relay::{Channels, Relay, Relayed};
+pub use run::{Connector, ConnectorError, Pass};

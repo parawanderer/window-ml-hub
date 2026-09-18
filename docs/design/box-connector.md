@@ -1,8 +1,14 @@
 # Notes: the box connector
 
-**Status: built** (`crates/box` classifies a frame from its tags, `crates/connector` reads the stream and
-publishes). What is not built: running it as a binary, which waits on pairing (how a connector gets its
-certificate), and reconnect-with-`since`, for which `at_ms` is already read. What the connector must do with a box's `/api/events` stream, from
+**Status: built** (`crates/box` classifies a frame from its tags, `crates/connector` reads the stream, publishes,
+and stays connected across a box's restarts). What is not built: running it as a binary, which waits on pairing
+(how a connector gets its certificate).
+
+**Reconnecting**: the connector asks for the gap since the newest `at_ms` it published, plus 30 seconds of slack for
+clock skew, and the box replays frames it has already relayed. There is no frame id to compare them by, so it
+remembers the hashes of the last 4,096 frames it published — the bytes are identical on replay, since nothing
+between the box and a subscriber re-encodes them, which is the same property everything else here rests on. A
+backfill longer than that window would republish, which is why the window is minutes of frames rather than seconds. What the connector must do with a box's `/api/events` stream, from
 the fork maintainer's answer (mlbox `reports/ui-api/events-schema-answer.md`, 2026-09-17) and the relay protocol. The
 schema is vendored at `proto/vendor/ollama/api/events.proto`; see [`../SCHEMAS.md`](../SCHEMAS.md).
 
