@@ -64,6 +64,19 @@ struct Serve {
     /// How much of that work may arrive at once.
     #[arg(long, env = "WMLHUB_ACCOUNT_BURST_BYTES", default_value_t = wmlhub_relay::Limits::default().account_burst_bytes)]
     account_burst_bytes: usize,
+    /// Sockets that have not authenticated yet, at once. This is what bounds the surface a stranger can occupy.
+    #[arg(long, env = "WMLHUB_MAX_PENDING_SOCKETS", default_value_t = wmlhub::Config::default().max_pending_sockets)]
+    max_pending_sockets: usize,
+    /// The largest first message accepted, before anything in it is decoded.
+    #[arg(long, env = "WMLHUB_MAX_HELLO_BYTES", default_value_t = wmlhub::Config::default().max_hello_bytes)]
+    max_hello_bytes: usize,
+    /// Connections one source address may open per minute. 0 (the default) admits everything, which is right behind a
+    /// proxy, where every client shares the proxy's address; set it when the hub is exposed directly.
+    #[arg(long, env = "WMLHUB_CONNECTIONS_PER_MINUTE", default_value_t = wmlhub::Config::default().arrivals.per_minute)]
+    connections_per_minute: u32,
+    /// How many of that allowance may be spent at once.
+    #[arg(long, env = "WMLHUB_CONNECTION_BURST", default_value_t = wmlhub::Config::default().arrivals.burst)]
+    connection_burst: u32,
     /// Independent relay shards, each with its own lock. 0 picks four per core.
     #[arg(long, env = "WMLHUB_SHARDS", default_value_t = 0)]
     shards: usize,
@@ -183,6 +196,10 @@ async fn serve(args: Serve) -> ExitCode {
     let mut config = wmlhub::Config { auth, shards: args.shards, ..wmlhub::Config::default() };
     config.limits.account_bytes_per_second = args.account_bytes_per_second;
     config.limits.account_burst_bytes = args.account_burst_bytes;
+    config.max_pending_sockets = args.max_pending_sockets;
+    config.max_hello_bytes = args.max_hello_bytes;
+    config.arrivals =
+        wmlhub::arrivals::Arrivals { per_minute: args.connections_per_minute, burst: args.connection_burst };
     tokio::select! {
         result = wmlhub::serve(listener, config, seed) => {
             if let Err(e) = result {

@@ -39,10 +39,14 @@ Open, found along the way:
   chat page's pairing UI. Proposed in [design/pairing.md](design/pairing.md); it adds the hub's only unauthenticated
   write, so the bounds in it want a second reading before code.
 
-- **A websocket message before `Hello` may be as large as any other** (`max_frame_bytes * 4`, 4 MiB by default),
-  across up to `max_sockets` unauthenticated sockets. The certificate inside is bounded; the message carrying it is
-  not. tokio-tungstenite 0.30 has no way to raise the limit after accept, so tightening it means reading the first
-  message with a small limit and switching to a second configuration, or a pre-auth socket budget in bytes.
+- **A first message is still READ at up to 4 MiB before it is refused.** `max_hello_bytes` (64 KiB) now refuses one
+  larger than a hello could be, but tokio-tungstenite 0.30 exposes only `get_config`, so the limit a connection reads
+  at cannot be lowered for the handshake and raised afterwards. What bounds it instead is `max_pending_sockets`
+  (256): at most that many sockets can be holding an unauthenticated message at once. Lowering it properly needs
+  either a way to change a live connection's config upstream, or our own handshake before the websocket one.
+- **An address-keyed connection rate cannot be the default while every client arrives from a proxy.**
+  `WMLHUB_CONNECTIONS_PER_MINUTE` exists and is off by default for that reason. Reading a forwarded address
+  (`X-Forwarded-For`, from proxies the operator names as trusted) is what would let it be on.
 
 - ~~**No limit on how fast an account publishes.**~~ Each account has a work budget now (docs/PROTOCOL.md §Limits and
   failure). Still unmetered: connecting and disconnecting, which cost a handshake and presence fan-out each.
