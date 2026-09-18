@@ -1365,6 +1365,8 @@ dependencies = [
  "getrandom",
  "prost",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "wmlhub",
  "wmlhub-box",
  "wmlhub-client",

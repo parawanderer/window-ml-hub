@@ -10,9 +10,17 @@ use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
+use tokio::sync::{mpsc, watch};
+use wmlhub_client::{Client, Config};
 use wmlhub_connector::pair::{Offer, PAIRING_WINDOW};
+use wmlhub_connector::relay::Channels;
+use wmlhub_connector::run::{Connector, PENDING_FRAMES};
+use wmlhub_connector::serve::Serving;
 use wmlhub_connector::state::State;
+use wmlhub_connector::{Target, state::Keys};
 use wmlhub_keys::{hex, principal_id, verify_chain};
+use wmlhub_proto::v1::Role;
+use wmlhub_seal::{ChannelKey, Sender, StreamKey};
 
 #[derive(Parser)]
 #[command(name = "wmlbox", version, about = "The window.ml box connector: relays a box's events through a hub")]
@@ -25,6 +33,8 @@ struct Cli {
 enum Command {
     /// Pair this connector with an account, by showing a code and a fingerprint for somebody to confirm.
     Pair(Pair),
+    /// Read this box's events and publish them through the hub, for as long as both are there.
+    Run(Run),
     /// Say who this connector is and what it was paired with.
     Status {
         #[arg(long, env = "WMLBOX_STATE_DIR", default_value = "wmlbox-state")]
@@ -50,6 +60,22 @@ struct Pair {
     again: bool,
 }
 
+#[derive(clap::Args)]
+struct Run {
+    /// The hub to publish through (`ws://` or `wss://`). The one this connector was paired on.
+    #[arg(long, env = "WMLBOX_HUB")]
+    hub: String,
+    /// The name the hub is known by, which is signed into every login. A hub calling itself something else is
+    /// refused before this connector signs anything.
+    #[arg(long, env = "WMLBOX_HUB_NAME")]
+    hub_name: String,
+    /// The box's events endpoint (`http://127.0.0.1:11434/api/events`).
+    #[arg(long, env = "WMLBOX_BOX", default_value = "http://127.0.0.1:11434/api/events")]
+    r#box: String,
+    #[arg(long, env = "WMLBOX_STATE_DIR", default_value = "wmlbox-state")]
+    state_dir: PathBuf,
+}
+
 fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
@@ -58,6 +84,7 @@ fn now_ms() -> u64 {
 async fn main() -> ExitCode {
     match Cli::parse().command {
         Command::Pair(args) => pair(args).await,
+        Command::Run(args) => run(args).await,
         Command::Status { state_dir } => status(&State::at(state_dir)),
     }
 }
@@ -114,6 +141,116 @@ async fn pair(args: Pair) -> ExitCode {
     println!();
     println!("Paired.");
     status(&state)
+}
+
+/// Everything a connector needs to publish, checked before it connects so that a failure names itself rather than
+/// arriving as a hub refusing a hello.
+struct Ready {
+    keys: Keys,
+    /// a second copy of the same keys: the client takes ownership of one, and the publisher signs grants with the
+    /// other. Two values of one key pair, not two key pairs.
+    publisher_identity: wmlhub_keys::Identity,
+    chain: Vec<wmlhub_proto::v1::Certificate>,
+    account_root: [u8; 32],
+    label: String,
+    channel_key: ChannelKey,
+}
+
+fn loaded(state: &State) -> Result<Ready, String> {
+    let keys = || match state.keys() {
+        Ok(Some(keys)) => Ok(keys),
+        Ok(None) => Err(format!("not paired: no keys in {}. Run `wmlbox pair --hub <url>`", state.dir().display())),
+        Err(e) => Err(e.to_string()),
+    };
+    let (keys, again) = (keys()?, keys()?);
+    let Some(paired) = state.paired().map_err(|e| e.to_string())? else {
+        return Err(format!("not paired: run `wmlbox pair --hub <url>` in {}", state.dir().display()));
+    };
+    let account_root = <[u8; 32]>::try_from(paired.account_root.as_slice())
+        .map_err(|_| "the account root in this connector's state is not a key; pair it again".to_owned())?;
+    let verified = verify_chain(&account_root, &paired.chain, now_ms())
+        .map_err(|e| format!("this connector's certificate does not verify ({e:?}); pair it again with --again"))?;
+    let channel_key = <[u8; 32]>::try_from(paired.channel_key.as_slice())
+        .map_err(|_| "the channel key in this connector's state is not a key; pair it again".to_owned())?;
+    Ok(Ready {
+        keys,
+        publisher_identity: again.identity,
+        chain: paired.chain,
+        account_root,
+        label: verified.leaf.label,
+        channel_key: ChannelKey::from_bytes(channel_key),
+    })
+}
+
+async fn run(args: Run) -> ExitCode {
+    tracing_subscriber::fmt().with_target(false).with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout())).init();
+    let state = State::at(&args.state_dir);
+    let ready = match loaded(&state) {
+        Ok(ready) => ready,
+        Err(e) => return fail(&e),
+    };
+    let target = match Target::parse(&args.r#box) {
+        Ok(target) => target,
+        Err(e) => return fail(&format!("--box {}: {e:?}", args.r#box)),
+    };
+
+    // The channels are named for this connector's own principal, not for a label somebody typed: a device reading
+    // them knows the principal from the paired-devices list, and two boxes called the same thing would otherwise
+    // publish on one channel.
+    let me = principal_id(&ready.keys.identity.public());
+    let channels = Channels {
+        edge: ready.channel_key.channel("box.edges", &me).to_vec(),
+        sample: ready.channel_key.channel("box.samples", &me).to_vec(),
+    };
+    // A fresh key per run, so "everything this key covered" is one run of this connector and a restart is a rotation
+    // nobody has to coordinate. A device that held the old one asks again.
+    let key = match StreamKey::generate() {
+        Ok(key) => key,
+        Err(e) => return fail(&format!("no random source: {e}")),
+    };
+
+    let (frames_tx, mut frames_rx) = mpsc::channel(PENDING_FRAMES);
+    let (published_tx, published_rx) = watch::channel(None);
+    let mut box_side = Connector::new(target, frames_tx, published_rx);
+    tokio::spawn(async move { box_side.run(now_ms).await });
+
+    let mut client = match Client::connect(Config {
+        url: args.hub.clone(),
+        hub_name: args.hub_name.clone(),
+        identity: ready.keys.identity,
+        agreement: ready.keys.agreement,
+        chain: ready.chain.clone(),
+        account_root: ready.account_root,
+        role: Role::BoxConnector,
+        invite: Vec::new(),
+    })
+    .await
+    {
+        Ok(client) => client,
+        Err(e) => return fail(&format!("cannot log in to {}: {e:?}", args.hub)),
+    };
+    tracing::info!(
+        hub = %args.hub,
+        r#box = %args.r#box,
+        label = %ready.label,
+        principal = %hex(&me),
+        "publishing"
+    );
+
+    // The grant carries this connector's own chain, which is how a device checks that the key it was handed came
+    // from the publisher it is subscribed to rather than from the hub.
+    let publisher = Sender { identity: &ready.publisher_identity, chain: &ready.chain };
+    let mut serving = Serving::new(publisher, &key, channels, published_tx);
+    let stopped = tokio::select! {
+        stopped = serving.run(&mut client, &mut frames_rx, &now_ms) => Some(stopped),
+        _ = tokio::signal::ctrl_c() => None,
+    };
+    let counts = serving.counts().clone();
+    tracing::info!(?counts, "stopping");
+    match stopped {
+        Some(e) => fail(&format!("{e:?}")),
+        None => ExitCode::SUCCESS,
+    }
 }
 
 fn status(state: &State) -> ExitCode {

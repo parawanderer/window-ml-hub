@@ -6,10 +6,12 @@
 //! decodes what the box wrote, not what a connector re-encoded.
 
 pub mod events;
+pub mod grant;
 pub mod http;
 pub mod pair;
 pub mod relay;
 pub mod run;
+pub mod serve;
 pub mod state;
 
 pub use events::{Events, IngestError};
@@ -17,4 +19,5 @@ pub use http::Target;
 pub use pair::{Left, Offer, PairError};
 pub use relay::{Channels, Relay, Relayed};
 pub use run::{Connector, ConnectorError, Pass};
+pub use serve::{ServeError, Served, Serving};
 pub use state::State;

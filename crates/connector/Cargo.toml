@@ -15,11 +15,13 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
 getrandom = "0.4"
-tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 wmlhub-box = { path = "../box" }
 wmlhub-client = { path = "../client" }
 wmlhub-seal = { path = "../seal" }
 wmlhub-frame = { path = "../frame" }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi"] }
 wmlhub-keys = { path = "../keys" }
 wmlhub-proto = { path = "../proto" }
 
@@ -28,6 +30,8 @@ prost = "0.14"
 tokio = { version = "1", features = ["rt-multi-thread"] }
 wmlhub = { path = "../hub" }
 wmlhub-box = { path = "../box", features = ["testing"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "ansi"] }
 wmlhub-keys = { path = "../keys" }
 
 [lints]

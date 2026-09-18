@@ -348,6 +348,12 @@ impl Client {
 
     /// The next event. Answers pings, opens sealed commands and results, and never returns one of the hub's own
     /// keepalives to the caller.
+    ///
+    /// **Safe to drop**, which is what lets a caller wait on this and on something else at once (the box connector
+    /// does: one websocket carries both what it publishes and what devices ask of it). Frames already read stay in
+    /// `self.pending`, and a read that had not finished had taken nothing. The one thing a dropped call can lose is
+    /// a pong it was about to send, and the hub's idle timeout counts any traffic, not pongs: a caller that dropped
+    /// this because it has something to send is about to send it.
     pub async fn next(&mut self) -> Result<Event, ClientError> {
         loop {
             let Some(frame) = self.pending.next() else {
