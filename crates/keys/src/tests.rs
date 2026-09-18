@@ -97,21 +97,67 @@ fn a_delegate_cannot_grant_a_scope_it_does_not_hold() {
 fn a_leaf_cannot_outlive_its_delegate() {
     let (root, laptop, phone) = (id(1), id(2), id(3));
     let delegate = issue(&root, &CertSpec { may_pair: true, ..spec(&laptop) });
-    let forever = issue(&laptop, &CertSpec { not_after_ms: 0, ..spec(&phone) });
     let longer = issue(&laptop, &CertSpec { not_after_ms: NOW + 5000, ..spec(&phone) });
     let chain = |leaf: Certificate| verify_chain(&root.public(), &[leaf, delegate.clone()], NOW);
-    assert_eq!(chain(forever).unwrap_err(), ChainError::OutlivesIssuer);
     assert_eq!(chain(longer).unwrap_err(), ChainError::OutlivesIssuer);
 }
 
 #[test]
-fn expiry_and_not_yet_valid_are_refused_and_zero_means_no_expiry() {
+fn expired_and_not_yet_valid_are_both_refused() {
     let (root, phone) = (id(1), id(2));
     let cert = issue(&root, &spec(&phone));
     assert_eq!(verify_chain(&root.public(), std::slice::from_ref(&cert), NOW + 1001).unwrap_err(), ChainError::Expired);
     assert_eq!(verify_chain(&root.public(), &[cert], NOW - 1001).unwrap_err(), ChainError::Expired);
-    let forever = issue(&root, &CertSpec { not_after_ms: 0, ..spec(&phone) });
-    assert!(verify_chain(&root.public(), &[forever], u64::MAX).is_ok());
+}
+
+#[test]
+fn a_certificate_must_carry_a_window_and_may_not_outlast_the_maximum() {
+    // Expiry is the revocation that works with nobody online, so "valid forever" is not something a certificate can
+    // say: a device that stops being renewed stops having access, however many lists were lost.
+    let (root, phone) = (id(1), id(2));
+    let chain = |spec: CertSpec| verify_chain(&root.public(), &[issue(&root, &spec)], NOW);
+    assert_eq!(chain(CertSpec { not_after_ms: 0, ..spec(&phone) }).unwrap_err(), ChainError::Unbounded);
+    assert_eq!(chain(CertSpec { not_before_ms: 0, ..spec(&phone) }).unwrap_err(), ChainError::Unbounded);
+    assert_eq!(
+        chain(CertSpec { not_after_ms: NOW + MAX_CERTIFICATE_MS + 1, ..spec(&phone) }).unwrap_err(),
+        ChainError::TooLong,
+        "a window one millisecond past the maximum"
+    );
+    assert_eq!(
+        chain(CertSpec { not_after_ms: NOW - 1000, ..spec(&phone) }).unwrap_err(),
+        ChainError::TooLong,
+        "a window that ends before it begins"
+    );
+    // and the longest window there is, at its edge
+    let longest = CertSpec { not_before_ms: NOW, not_after_ms: NOW + MAX_CERTIFICATE_MS, ..spec(&phone) };
+    assert!(chain(longest).is_ok());
+}
+
+#[test]
+fn a_box_connector_may_neither_pair_nor_approve() {
+    // It relays one machine's telemetry. Encoding that beats documenting it: an issuer that gets it wrong is refused
+    // rather than trusted.
+    let (root, connector) = (id(1), id(2));
+    let as_connector = |spec: CertSpec| CertSpec { role: Role::BoxConnector, ..spec };
+    let chain = |spec: CertSpec| verify_chain(&root.public(), &[issue(&root, &spec)], NOW);
+    assert_eq!(
+        chain(as_connector(CertSpec { may_pair: true, ..spec(&connector) })).unwrap_err(),
+        ChainError::RoleNotPermitted
+    );
+    for forbidden in BOX_CONNECTOR_FORBIDS {
+        let scopes = vec![scope::VIEW.into(), forbidden.into()];
+        assert_eq!(
+            chain(as_connector(CertSpec { scopes, ..spec(&connector) })).unwrap_err(),
+            ChainError::RoleNotPermitted,
+            "{forbidden}"
+        );
+    }
+    // what it may hold
+    let ordinary = as_connector(CertSpec { scopes: vec![scope::VIEW.into()], ..spec(&connector) });
+    assert!(chain(ordinary).is_ok());
+    // and the same scopes on a client are fine: the rule is about the role, not the names
+    let client = CertSpec { scopes: vec![scope::APPROVE.into()], ..spec(&connector) };
+    assert!(chain(client).is_ok());
 }
 
 #[test]
@@ -178,14 +224,11 @@ fn transcript_fields_cannot_be_shifted_between_each_other() {
 /// (a 500 KB hello, from nobody) took 2.7 s of hub CPU on a tokio worker. Bodies are now bounded before anything else.
 fn forged_pair(delegate_scopes: Vec<String>, leaf_scopes: Vec<String>, label: &str) -> [Certificate; 2] {
     let (root, attacker, phone) = (id(1), id(2), id(3));
-    let mut parent = CertificateBody::decode(
-        issue(&root, &CertSpec { may_pair: true, not_after_ms: 0, ..spec(&attacker) }).body.as_slice(),
-    )
-    .unwrap();
+    let mut parent =
+        CertificateBody::decode(issue(&root, &CertSpec { may_pair: true, ..spec(&attacker) }).body.as_slice()).unwrap();
     parent.scopes = delegate_scopes;
     let delegate = Certificate { body: parent.encode_to_vec(), signature: vec![0; 64] };
-    let leaf =
-        issue(&attacker, &CertSpec { not_after_ms: 0, scopes: leaf_scopes, label: label.into(), ..spec(&phone) });
+    let leaf = issue(&attacker, &CertSpec { scopes: leaf_scopes, label: label.into(), ..spec(&phone) });
     [leaf, delegate]
 }
 

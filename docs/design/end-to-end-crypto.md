@@ -45,6 +45,25 @@ the upgrade path, not the start.
   one from the other.
 - **A principal id is `SHA-256(Ed25519 public key)`**, which is what `Hello.principal` becomes.
 
+### Certificates expire, and that is the revocation that always works
+
+Every certificate carries both `not_before_ms` and `not_after_ms`, and may not be valid for longer than
+`MAX_CERTIFICATE_MS` (90 days). "Valid forever" is not something a certificate can say.
+
+The reason is what revocation costs otherwise. A runtime's allowlist stops a revoked device at once and needs nothing
+from the hub, which is the mechanism that matters (window-ml `docs/spec/CHAT_PAGE.md` §Pairing). What it cannot reach
+is an account nobody is watching: no runtime online, no list anywhere, and a certificate that never ends. With a
+window, a device that stops being renewed stops having access, so revoking is simply not renewing, and every other
+gap is bounded by the same clock.
+
+Renewal is an ordinary sealed command: a device whose certificate is still valid asks the root or a `may_pair`
+delegate, which answers with a new certificate for the same subject key while that device is still on the runtime's
+allowlist. Nothing new on the hub, and nothing to distribute.
+
+A **box connector's** certificate may never set `may_pair` or carry `approve` or `control`: it relays one machine's
+telemetry. Encoding that in the verifier beats documenting it, since an issuer that gets it wrong is then refused
+rather than trusted.
+
 ### Accounts (step 5), from the same keys
 
 - **An account is a root Ed25519 key**, created on the first device and kept there, never exported (decision 4). The

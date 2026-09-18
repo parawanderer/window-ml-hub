@@ -57,8 +57,8 @@ impl Device {
                 role,
                 scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
                 may_pair: false,
-                not_before_ms: 0,
-                not_after_ms: 0,
+                not_before_ms: now_ms() - 3_600_000,
+                not_after_ms: now_ms() + 3_600_000,
                 label: String::new(),
             },
         );

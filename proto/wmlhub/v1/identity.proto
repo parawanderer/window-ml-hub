@@ -46,7 +46,9 @@ message CertificateBody {
   repeated string scopes = 10;
   // May issue certificates in turn (a second device that can pair new ones). Chains are at most two long.
   bool may_pair = 6;
-  // validity, epoch milliseconds; `not_after_ms` 0 means no expiry, and a child never outlives its issuer
+  // Validity, epoch milliseconds. BOTH are required and a certificate may not be valid for longer than 90 days
+  // (`MAX_CERTIFICATE_MS`): expiry is the one revocation that needs no list, no hub and nobody online, so a device
+  // that stops being renewed stops having access. A child never outlives its issuer.
   uint64 not_before_ms = 7;
   uint64 not_after_ms = 8;
   // a name its owner chose ("phone"); display text, never proof of anything

@@ -52,8 +52,8 @@ fn device(root: &Identity, seed: u8, role: Role) -> Device {
         role,
         scopes: vec![wmlhub_keys::scope::VIEW.into(), wmlhub_keys::scope::DRIVE.into()],
         may_pair: false,
-        not_before_ms: 0,
-        not_after_ms: 0,
+        not_before_ms: now_ms() - 3_600_000,
+        not_after_ms: now_ms() + 3_600_000,
         label: format!("device {seed}"),
     };
     Device { chain: vec![issue(root, &spec)], key, role }

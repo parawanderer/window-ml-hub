@@ -31,14 +31,17 @@ fuzz_target!(|data: &[u8]| {
     if root.public() == mid.public() || root.public() == leaf.public() || mid.public() == leaf.public() {
         return;
     }
+    // A certificate must carry a window that contains `now`, and `now` here is arbitrary, so the window is built
+    // around it: an hour either side, which is inside MAX_CERTIFICATE_MS however extreme the clock is.
+    let now = now.clamp(3_600_001, u64::MAX - 3_600_001);
     let spec = |subject: &Identity, may_pair: bool| CertSpec {
         subject: subject.public(),
         agreement_key: [7; 32],
         role: Role::Client,
         scopes: vec![scope::VIEW.into()],
         may_pair,
-        not_before_ms: 0,
-        not_after_ms: 0,
+        not_before_ms: now - 3_600_000,
+        not_after_ms: now + 3_600_000,
         label: String::new(),
     };
     let mut chain = if delegate {

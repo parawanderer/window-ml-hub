@@ -30,8 +30,8 @@ fn fixture() -> &'static Fixture {
             role,
             scopes,
             may_pair: false,
-            not_before_ms: 0,
-            not_after_ms: 0,
+            not_before_ms: NOW - 86_400_000,
+            not_after_ms: NOW + 86_400_000,
             label: String::new(),
         };
         let phone_chain = vec![issue(&root, &spec(&phone, 12, Role::Client, vec![scope::DRIVE.into()]))];

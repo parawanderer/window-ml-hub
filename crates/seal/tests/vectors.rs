@@ -19,7 +19,9 @@ use wmlhub_seal::{
     seal_frame, seal_result, wrap_key,
 };
 
-const VERSION: u32 = 1;
+/// 2: every certificate carries a validity window, which the verifier now requires, so a file at version 1 fails
+/// against this implementation rather than merely being old.
+const VERSION: u32 = 2;
 const HUB: &str = "hub.test";
 const TIME_MS: u64 = 1_800_000_000_000;
 /// Fixed, so the vectors are the same story every time they are regenerated.
@@ -63,7 +65,7 @@ impl Who {
                 scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
                 may_pair: false,
                 not_before_ms: TIME_MS - 86_400_000,
-                not_after_ms: 0,
+                not_after_ms: TIME_MS + 86_400_000,
                 label: String::new(),
             },
         )];

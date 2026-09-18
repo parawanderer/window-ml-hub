@@ -31,8 +31,8 @@ fn fixture() -> &'static Fixture {
             role,
             scopes: vec![scope::VIEW.into()],
             may_pair: false,
-            not_before_ms: 0,
-            not_after_ms: 0,
+            not_before_ms: NOW - 86_400_000,
+            not_after_ms: NOW + 86_400_000,
             label: String::new(),
         };
         let runtime_chain = vec![issue(&root, &cert(&runtime, 12, Role::Runtime))];

@@ -82,17 +82,42 @@ A pairing slot is the hub's only unauthenticated write, so it is the thing to be
 - **The offer is public to whoever has the code.** That is the point, and it is why the code is short-lived: the
   offer carries no secret, only public keys the person is about to confirm.
 
+## Revocation, and what a headless connector does (decided 2026-09-18)
+
+From the UI session's answer (window-ml `tmp/hub-revocation-and-headless-pairing.md`), which is worth reading for the
+argument rather than only the conclusions.
+
+- **The authoritative revocation is the runtime's allowlist**, which takes effect at once and needs nothing from the
+  hub. That property is what keeps the hub trusted with routing only, and it is not moving into the hub.
+- **Expiry is what the allowlist cannot reach**, so every certificate now carries a bounded window (above). This was
+  settled first because it cannot be retrofitted once long-lived certificates exist.
+- **Revoking a device must rotate every stream key it held** and re-grant to the devices that remain, because
+  nothing else stops it decrypting what is published afterwards. `from_counter` is the other half: the new key is
+  granted from the counter it begins at, so the remaining devices read on and nothing is re-encrypted. Rotation on
+  unpair is part of the pairing work, not a later item: a revocation that leaves the stream readable is not one.
+- **A hub-side revocation list is resource control, not security**, and is deferred until after pairing lands. A
+  revoked device can still connect and spend the account's budget until its certificate expires; the runtime refuses
+  its commands throughout. When it is built it is a small signed list per account, monotonically versioned so an
+  older list cannot be rolled back over a newer one, and the security statement stays "the runtime decides".
+- **Revocation names a certificate by the SHA-256 of its transmitted body**, or a device by its subject key. The body
+  is verified exactly as transmitted, so its hash is a stable identifier and no schema field is needed.
+- **A headless connector pairs through the same protocol**, because the box must generate its own key: a private key
+  that arrives from elsewhere is a private key that existed elsewhere. Two ways for a person to approve it, and the
+  difference is stated rather than hidden:
+  - **Attended**: the connector prints the comparison code, the operator confirms it in the pairing UI. Nothing is
+    trusted but the two screens.
+  - **Unattended**: the operator generates a one-time token in the pairing UI and puts it in the box's config, where
+    the box's other configuration already comes from. The connector redeems it once, inside a bounded window, for a
+    certificate with no `may_pair` and a narrow scope set. **This trusts the channel the token travelled on**, which
+    the attended path does not. Acceptable for a box an operator provisions; not offered to a phone.
+
 ## What is still open
 
 - **Whether a pairing slot lives in the relay or beside the registry.** It is account-less until the certificate is
   issued, which argues for the registry (where open registration's rate limiting already lives) rather than the
   relay's per-account structures.
-- **Revocation**, which this design does not address at all: unpairing today means rotating stream keys and letting
-  the certificate expire. A short `not_after` on a paired device's certificate, with re-pairing as renewal, may be
-  enough and is worth deciding before the first long-lived certificate is issued.
-- **Whether a connector pairs at all**, or whether a box connector is configured with a certificate by the operator
-  who runs it, the way a server gets a TLS certificate. For a self-hosted hub, the operator and the account holder
-  are usually the same person.
+- **What a renewal command looks like** in the session contract's terms, since it is a command like any other and the
+  chat page renders the paired-device list that offers it.
 - The word list for fingerprints, which should be the one the extension already ships if it has one.
 
 ## Why not simpler
