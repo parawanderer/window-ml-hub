@@ -66,8 +66,15 @@ ever sees a code it did not pick.
    be skipped for convenience.
 5. **The person confirms, and picks scopes** (the UI proposes a default per role). The paired device issues the
    certificate, seals it to the offered agreement key, and posts it back to the slot.
-6. **The new principal takes the certificate**, verifies it chains to the account root it was told to expect, and logs
-   in normally. The slot is deleted on first collection.
+6. **The new principal takes the answer**, opens it with the agreement key it offered, verifies the certificate
+   chains to the account root inside, and logs in normally. The slot is deleted on first collection.
+
+**The answer is sealed to the key the offer carried**, because it hands over more than a certificate: it carries the
+account's **channel key**, without which a device cannot name any of the account's streams. The certificate is
+public, but there is no reason to put it in the clear beside a key that is not, and a hub that could read a slot would
+otherwise learn the name of every channel the account uses. HPKE with its own label, no principal ids bound in —
+neither side has a certificate for the other yet, which is the situation pairing exists to fix, and what binds it
+instead is the person comparing a fingerprint of the very key it seals to.
 
 The fingerprint is `SHA-256("wmlhub/pairing/v1" || identity_key || agreement_key)`. `crates/keys` hands back the
 digest and a twelve-character hex rendering for where words are wrong (a connector printing to a terminal); the word

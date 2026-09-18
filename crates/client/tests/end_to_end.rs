@@ -266,18 +266,25 @@ async fn a_new_device_pairs_through_the_hub_and_then_logs_in_with_what_it_was_gi
             label: offered.label.clone(),
         },
     );
-    let answer = wmlhub_proto::v1::PairingAnswer {
-        sealed_certificate: certificate.encode_to_vec(),
+    // sealed to the key the offer carried, because it also hands over the account's channel key
+    let channel_key = [77u8; 32];
+    let paired_with = wmlhub_proto::v1::PairedWith {
+        certificate: Some(certificate),
         account_root: root.public().to_vec(),
-    }
-    .encode_to_vec();
+        channel_key: channel_key.to_vec(),
+    };
+    let offered_agreement: [u8; 32] = offered.agreement_key.as_slice().try_into().unwrap();
+    let sealed = wmlhub_seal::seal_pairing_answer(&offered_agreement, &paired_with).unwrap();
+    let answer = wmlhub_proto::v1::PairingAnswer { sealed }.encode_to_vec();
     ph.pairing_answer(&typed.hash(), answer).await.unwrap();
 
-    // the new device receives it, and logs in with it like any other principal
+    // the new device opens it with the key it offered, and logs in with what was inside
     let got = pairing.answer().await.unwrap();
     let got = wmlhub_proto::v1::PairingAnswer::decode(got.as_slice()).unwrap();
-    assert_eq!(got.account_root, root.public().to_vec());
-    let certificate = Certificate::decode(got.sealed_certificate.as_slice()).unwrap();
+    let opened = wmlhub_seal::open_pairing_answer(&AgreementKey::from_seed(&[43; 32]), &got.sealed).unwrap();
+    assert_eq!(opened.account_root, root.public().to_vec());
+    assert_eq!(opened.channel_key, channel_key.to_vec(), "and the account's channel key came with it");
+    let certificate = opened.certificate.expect("a certificate");
 
     let paired = Client::connect(Config {
         url: url.clone(),

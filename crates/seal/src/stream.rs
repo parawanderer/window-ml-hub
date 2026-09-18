@@ -342,3 +342,11 @@ impl StreamReader {
 #[cfg(test)]
 #[path = "stream_tests.rs"]
 mod tests;
+
+/// The bytes of this channel key, for a device handing it to another device it is pairing. Never sent to the hub, and
+/// never out of a seal.
+impl ChannelKey {
+    pub fn to_bytes(&self) -> [u8; 32] {
+        self.0
+    }
+}
