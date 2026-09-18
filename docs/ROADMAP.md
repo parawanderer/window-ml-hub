@@ -38,9 +38,11 @@ In order. Each step lands as its own PR with CI green. Design questions are answ
 
 Open, found along the way:
 
-- **Pairing's protocol is built** ([design/pairing.md](design/pairing.md)); what is left is the two UIs that drive
-  it, the chat page's and the connector's terminal prompt, and rotation-on-unpair, which belongs with the first of
-  those.
+- **Pairing's protocol is built** ([design/pairing.md](design/pairing.md)), and so is the connector's terminal side
+  (`wmlbox pair`). What is left is the chat page's pairing UI, and rotation-on-unpair, which is now a proposal of
+  its own ([design/revocation.md](design/revocation.md)) because `wmlbox run` made the gap concrete: a connector
+  grants its stream key to any valid certificate holding `view`, so a revoked device is still granted one until its
+  certificate expires.
 
 - **A first message is still READ at up to 4 MiB before it is refused.** `max_hello_bytes` (64 KiB) now refuses one
   larger than a hello could be, but tokio-tungstenite 0.30 exposes only `get_config`, so the limit a connection reads
@@ -52,6 +54,8 @@ Open, found along the way:
   (`X-Forwarded-For`, from proxies the operator names as trusted) is what would let it be on.
 
 - ~~**No limit on how fast an account publishes.**~~ Each account has a work budget now (docs/PROTOCOL.md §Limits and
-  failure). Still unmetered: connecting and disconnecting, which cost a handshake and presence fan-out each.
+  failure). Still unmetered: connecting and disconnecting, which cost a handshake and presence fan-out each. This is
+  the one limit that is not per account, and the address-keyed knob cannot be the default behind a proxy, so it is
+  next.
 
 Later: agent-to-agent (lineage, spawn grants), headless runtimes, WebTransport.
