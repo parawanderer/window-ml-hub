@@ -3,7 +3,7 @@
 use super::*;
 use crate::tests::{Account, NOW};
 use crate::{AgreementKey, open_pairing_answer, seal_command, seal_pairing_answer, seal_result};
-use wmlhub_keys::scope;
+use wmlhub_keys::{MAX_CHAIN, scope};
 
 const CHANNEL: &[u8] = b"ch-42";
 
@@ -311,7 +311,7 @@ fn what_a_device_is_paired_with_opens_only_for_the_key_its_offer_carried() {
     let a = Account::new(1);
     let offered = AgreementKey::from_seed(&[77; 32]);
     let paired = PairedWith {
-        certificate: Some(a.phone.chain[0].clone()),
+        chain: vec![a.phone.chain[0].clone()],
         account_root: a.root.public().to_vec(),
         channel_key: vec![9; 32],
     };
@@ -320,7 +320,7 @@ fn what_a_device_is_paired_with_opens_only_for_the_key_its_offer_carried() {
     let opened = open_pairing_answer(&offered, &sealed).unwrap();
     assert_eq!(opened.account_root, a.root.public().to_vec());
     assert_eq!(opened.channel_key, vec![9; 32]);
-    assert_eq!(opened.certificate, Some(a.phone.chain[0].clone()));
+    assert_eq!(opened.chain, vec![a.phone.chain[0].clone()]);
 
     // the hub holds this blob, and a hub is exactly who must not read it: the channel key is in there
     let someone_else = AgreementKey::from_seed(&[78; 32]);
@@ -332,7 +332,11 @@ fn a_pairing_answer_is_not_a_command_and_a_command_is_not_a_pairing_answer() {
     use wmlhub_proto::v1::PairedWith;
     let a = Account::new(1);
     let offered = AgreementKey::from_seed(&[77; 32]);
-    let paired = PairedWith { certificate: None, account_root: a.root.public().to_vec(), channel_key: vec![9; 32] };
+    let paired = PairedWith {
+        chain: vec![a.phone.chain[0].clone()],
+        account_root: a.root.public().to_vec(),
+        channel_key: vec![9; 32],
+    };
     let sealed = seal_pairing_answer(&offered.public(), &paired).unwrap();
     // the phone's own agreement key, and a command sealed to it, are a different label and a different shape
     let (command, _) = seal_command(&a.phone.sender(), &a.runtime.recipient(), scope::DRIVE, b"x", NOW).unwrap();
@@ -343,10 +347,16 @@ fn a_pairing_answer_is_not_a_command_and_a_command_is_not_a_pairing_answer() {
 #[test]
 fn a_malformed_pairing_answer_is_refused_rather_than_half_read() {
     use wmlhub_proto::v1::PairedWith;
+    let a = Account::new(1);
+    let cert = a.phone.chain[0].clone();
     let offered = AgreementKey::from_seed(&[77; 32]);
     for wrong in [
-        PairedWith { certificate: None, account_root: vec![1; 31], channel_key: vec![9; 32] },
-        PairedWith { certificate: None, account_root: vec![1; 32], channel_key: vec![9; 16] },
+        PairedWith { chain: vec![cert.clone()], account_root: vec![1; 31], channel_key: vec![9; 32] },
+        PairedWith { chain: vec![cert.clone()], account_root: vec![1; 32], channel_key: vec![9; 16] },
+        // a chain is at least a leaf, and never longer than a verifier would accept: a device that stored one it
+        // cannot log in with would find out at the hub, with nothing to say about why
+        PairedWith { chain: Vec::new(), account_root: vec![1; 32], channel_key: vec![9; 32] },
+        PairedWith { chain: vec![cert.clone(); MAX_CHAIN + 1], account_root: vec![1; 32], channel_key: vec![9; 32] },
     ] {
         let sealed = seal_pairing_answer(&offered.public(), &wrong).unwrap();
         assert_eq!(open_pairing_answer(&offered, &sealed).unwrap_err(), OpenError::Malformed);

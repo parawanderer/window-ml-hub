@@ -96,8 +96,10 @@ message PairingAnswer {
 // What a device is given when it is paired, inside the seal: everything it needs to be a member of the account and
 // nothing about any other member.
 message PairedWith {
-  // the certificate issued for the keys the offer carried
-  Certificate certificate = 1;
+  // The chain for the keys the offer carried, leaf first, up to but not including the account root: one certificate
+  // when the root issued it, two when a device holding `may_pair` did. A device that could only be sent one could
+  // only be paired by the root, which is the case losing a phone is supposed to survive.
+  repeated Certificate chain = 1;
   // the account root to expect, so the new principal can verify the chain it was just given
   bytes account_root = 2;
   // The account's channel key. Channel names are an HMAC under it, so a device cannot subscribe to or publish on the

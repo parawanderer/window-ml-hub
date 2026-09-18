@@ -65,7 +65,9 @@ ever sees a code it did not pick.
    the new principal is showing. This is the step that stops a hub in the middle, and it is the only step that cannot
    be skipped for convenience.
 5. **The person confirms, and picks scopes** (the UI proposes a default per role). The paired device issues the
-   certificate, seals it to the offered agreement key, and posts it back to the slot.
+   certificate, seals it to the offered agreement key, and posts it back to the slot. What it seals is the whole
+   chain, leaf first: one certificate when the root issued it, two when a device holding `may_pair` did, because a
+   device given only the leaf could verify nothing above the key that signed it.
 6. **The new principal takes the answer**, opens it with the agreement key it offered, verifies the certificate
    chains to the account root inside, and logs in normally. The slot is deleted on first collection.
 
