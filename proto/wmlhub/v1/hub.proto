@@ -205,6 +205,13 @@ message Presence {
   bytes principal = 1;
   Role role = 2;
   bool online = 3;
+  // The chain this principal presented, leaf first, on a presence that says it came ONLINE; empty when it went away.
+  //
+  // Certificates are public — they are what the hub verifies with public keys only — and a publisher needs the leaf's
+  // agreement key to wrap a stream key to a device. Without this, a runtime would know a phone is online and have no
+  // way to seal anything to it. A subscriber verifies the chain itself against the account root it already holds;
+  // the hub passing it along is a convenience, not a claim.
+  repeated Certificate chain = 4;
 }
 
 message Ping {
