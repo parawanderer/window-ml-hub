@@ -1,6 +1,7 @@
 # Proposal: revoking a device, once it already holds keys
 
-**Status: proposed, nothing built.** The argument it continues is window-ml `tmp/hub-revocation-and-headless-pairing.md`
+**Status: proposed, nothing built. The four questions below are answered** (see Decided), and one new one is open:
+where the account root key lives, which decides whether a revocation can be signed when a person asks for it. The argument it continues is window-ml `tmp/hub-revocation-and-headless-pairing.md`
 (the UI session's answer, worth reading for the reasoning) and [`pairing.md`](pairing.md) §Revocation, which settled
 the two halves that could not wait: every certificate now carries a bounded window, and a headless connector pairs
 through the same protocol as a phone.
@@ -95,23 +96,52 @@ bounded number of entries (proposed 256, with a list that would exceed it being 
 revocation), and a bounded size. It is written only by a principal that has already authenticated on that account
 and holds the root or a delegate that may pair.
 
-## What is open, and what I would like the UI session to decide
+## Decided (2026-09-18, window-ml `tmp/chat-page-revocation-answers.md`)
 
-These are the questions where the runtime's shape decides mine, so I would rather ask than guess.
+The chat-page session answered all four, and the answers are worth their reasons rather than only their verdicts.
 
-- **Who may sign a list?** The account root is obvious. A device holding `may_pair` is the interesting case: it can
-  create a device, so it is odd if it cannot un-create one, but a delegate revoking something the root granted is a
-  wider power than delegating. My inclination is the root only, with the `admin` scope being what lets a phone ASK
-  the runtime to do it (`device.revoke`), rather than the phone signing anything itself.
-- **How does a publisher that was offline catch up?** It comes back with an old version and nothing tells it. Either
-  it asks on connect (a `box.grant` answer could carry the current version, which is the cheap version), or the
-  runtime pushes to whatever presence says is there. The first is one field; the second is a protocol.
-- **Does `device.revoke` return before or after the publishers have been told?** The rotation rollup we agreed
-  answers "after, but tell the person what is still owed", and that is what the `rotation` field on `DeviceInfo`
-  renders. This proposal is the thing that makes that field non-zero for a while.
-- **Is a box connector a publisher the runtime knows about?** It is on the account's paired-device list, so it is in
-  `device.list`, but the runtime has no other relationship with it. Telling it about a revocation means sending it a
-  sealed command, which the runtime can do from the list alone.
+- **The root signs; `admin` is permission to ASK.** Not a `may_pair` delegate, for three reasons: a list is rendered
+  from one runtime's allowlist, and two signers means two lists that can disagree with no way for a UI to say which
+  is true; `may_pair` creates something NARROWER than itself, which is what makes delegation safe, while revoking
+  acts on a peer and possibly on the device that delegated you; and a phone that could both pair and revoke is an
+  account takeover from one lost device.
+- **Catch-up is a pull, with a push as a nicety.** The answer to `box.grant` carries the current list version, which
+  costs one field and is checked at the only moment that matters: when a publisher is about to hand out a key. A
+  publisher offline for a week learns before it grants anything. The runtime also pushes on change to whatever
+  presence says is there, best-effort, with no acknowledgements and no retries, so the guarantee does not depend on
+  presence being accurate. One guarantee and one optimisation, which is the same split as A and B above.
+- **`device.revoke` returns as soon as the allowlist is updated**, not after the publishers are told. The allowlist
+  is the authoritative act and it is immediate; blocking on N publishers would make the one action people press when
+  they are worried the slowest thing in the product, with its latency set by the least responsive connector on the
+  account. It would also be a lie either way, since an offline connector cannot be told at all. `rotation` is what
+  carries the rest.
+- **A box connector is a publisher the runtime pushes to.** Its being on the paired-device list with no other
+  relationship to the runtime is not an objection: the list is enough to reach it, and revocation IS the
+  relationship. A revoked phone's `rotation.streams` counts the connector's channels too, or the list says nothing
+  is owed while the phone can still read a box.
+
+## The one this raises, which decides whether the above holds
+
+**Where does the account root key live?** The answers above assume something online can sign when a person revokes.
+If the root lives on a device kept apart, then `device.revoke` updates the allowlist at once and nothing is signed
+until that device is reachable, so publishers keep granting to the revoked device and the "returns at once" answer
+needs a sentence about what is still owed for longer than the rollup implies.
+
+Three ways out, and this is the hub session's recommendation rather than a decision:
+
+- **The runtime holds the root.** Simplest, and it is already close to true: a runtime that renews the devices on
+  its allowlist before they lapse has to issue certificates, which needs the root or a `may_pair` delegate. The cost
+  is that the account's root key lives in a browser profile, and losing the profile loses the account unless it was
+  backed up.
+- **The runtime holds `may_pair` only, and revocation waits for the root.** Honest, and the UI has to say "revoked
+  here; the keys rotate when <device> is next online", which is a worse sentence than the one we agreed.
+- **A separate `may_revoke`, granted at the runtime and never delegable.** It keeps every reason from answer 1: one
+  signer per runtime, a power the root grants explicitly rather than one that rides along with pairing, and a stolen
+  phone that does not have it. It costs a certificate field and a rule in `verify_chain`.
+
+I would build the third if the root cannot be assumed online, and the first if it can. Either way the list's
+`version` is per account and monotonic, so whatever signs must be the only thing that signs, or two signers race and
+the loser's revocation is refused as stale.
 
 ## Why not simpler
 
