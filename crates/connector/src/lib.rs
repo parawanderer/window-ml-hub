@@ -7,10 +7,14 @@
 
 pub mod events;
 pub mod http;
+pub mod pair;
 pub mod relay;
 pub mod run;
+pub mod state;
 
 pub use events::{Events, IngestError};
 pub use http::Target;
+pub use pair::{Left, Offer, PairError};
 pub use relay::{Channels, Relay, Relayed};
 pub use run::{Connector, ConnectorError, Pass};
+pub use state::State;

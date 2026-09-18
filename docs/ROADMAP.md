@@ -27,9 +27,10 @@ In order. Each step lands as its own PR with CI green. Design questions are answ
    ([VECTORS.md](VECTORS.md)).
 7. **The box connector mode.** Schema vendored ([SCHEMAS.md](SCHEMAS.md)); relay rules in
    [design/box-connector.md](design/box-connector.md). Routing a frame by its tags, without decoding it:
-   `crates/box`; reading the stream and publishing it sealed on the two channels: `crates/connector`. Next: the
-   binary, which waits on pairing ([design/pairing.md](design/pairing.md), proposed). Reconnect and duplicate
-   suppression are in.
+   `crates/box`; reading the stream and publishing it sealed on the two channels: `crates/connector`. Reconnect and
+   duplicate suppression are in, and `wmlbox pair` pairs a box at its terminal
+   ([design/pairing.md](design/pairing.md)). Next: `wmlbox run`, which needs a way for a device to be granted the
+   box's stream key, since a connector has no directory of the account's devices.
 8. **The extension's connector** in window-ml's background worker. Last, and coordinated with the chat page work,
    because both talk to `background.ts`.
 9. **Push for approvals** on a sleeping phone, carrying only "an approval is waiting".

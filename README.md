@@ -65,7 +65,7 @@ Which repository owns which wire schema, and how the others pin it: [`docs/SCHEM
 | `crates/relay` | the routing core with no IO: accounts, presence, streams and rings, backpressure, limits |
 | `proto/` | the hub's wire schema (rules in [`docs/PROTOCOL.md`](docs/PROTOCOL.md)); `proto/vendor/` holds pinned copies of other repos' schemas |
 | `crates/box` | the box connector's reading of an `/api/events` frame: which channel it belongs on, without decoding it |
-| `crates/connector` | the box connector: reads a box's `/api/events` and republishes each frame through a hub, sealed and unchanged |
+| `crates/connector` | the `wmlbox` binary and its library: pairs a box with an account, then republishes each `/api/events` frame through a hub, sealed and unchanged |
 | `crates/client` | a client: the authenticated handshake, subscriptions, sealed commands, and the end-to-end tests that drive a real hub |
 | `vectors/` | what the two implementations are checked against, each way ([docs/VECTORS.md](docs/VECTORS.md)) |
 | `crates/loadgen` | `wmlhub-loadgen`: throughput, latency percentiles, CPU per delivery, memory per connection ([docs/perf](docs/perf/README.md)) |
@@ -91,6 +91,17 @@ The hub authenticates every connection with a certificate chain ending at an acc
 account either with an operator invite (`--registration invite`, the default) or to anyone, rate limited
 (`--registration open`). It speaks plain websockets: put TLS in front of it (Tailscale, Caddy). Every option has a
 `WMLHUB_*` environment variable; `wmlhub serve --help` lists them.
+
+**Pairing a GPU box** so its telemetry reaches the account's devices:
+
+```bash
+cargo run -p wmlhub-connector --bin wmlbox -- pair --hub wss://hub.example.com --label mlbox
+cargo run -p wmlhub-connector --bin wmlbox -- status
+```
+
+`pair` prints a code and a fingerprint. Type the code into a device on the account that may pair, and check it
+shows the same fingerprint before confirming: that comparison is the only thing standing between the box and a hub
+that offered its own keys instead ([docs/design/pairing.md](docs/design/pairing.md)).
 
 ## Building
 
