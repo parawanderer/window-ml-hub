@@ -21,6 +21,10 @@ drift apart quietly: change how anything is signed, sealed or named and that tes
 | `frame` | a published frame under that key, with the batch inside it |
 | `channel_key`, `channels` | an account channel key and the names it produces for three purpose/subject pairs |
 
+The filename names the PROTOCOL version (`wmlhub/v1`); the `version` field inside names the file's own revision, and
+it is at **2**: every certificate now carries a validity window, which verifiers require, so a file at version 1 fails
+against a current implementation rather than merely being old.
+
 Seeds are given so an implementation can derive the same keys rather than importing raw private keys: an identity is
 Ed25519 from its 32-byte seed, an agreement key is RFC 9180 `DeriveKeyPair` over its 32-byte seed.
 

@@ -18,6 +18,20 @@ pub type PublicKey = [u8; 32];
 /// The longest chain accepted: a leaf issued by the root, or by one delegate the root allowed to pair.
 pub const MAX_CHAIN: usize = 2;
 
+/// The longest a certificate may be valid for. Every certificate carries a real window, so an account nobody is
+/// watching stops being reachable on its own: a device that is never renewed loses access, which is the one form of
+/// revocation that needs no list, no hub and nobody online. Renewal is a command the root or a `may_pair` delegate
+/// answers while the device is still on the runtime's allowlist, so revoking is simply not renewing.
+///
+/// 90 days is chosen for what it costs when it is wrong: a device that has been away longer re-pairs, which is a
+/// minute with the person present, and a device that is stolen is useless within a quarter even if every other
+/// mechanism failed.
+pub const MAX_CERTIFICATE_MS: u64 = 90 * 24 * 60 * 60 * 1_000;
+
+/// Scopes a box connector's certificate may never carry: it relays one machine's telemetry and answers a few
+/// commands about it. Nothing about that involves approving anything or driving a session.
+pub const BOX_CONNECTOR_FORBIDS: [&str; 2] = [scope::APPROVE, "control"];
+
 /// The largest encoded certificate body accepted. Checked before decoding: a hello is read before its sender is
 /// authenticated, so nothing in it may cost more than its size allows. A body with every field at its limit is about
 /// 750 bytes.
@@ -148,6 +162,12 @@ pub enum ChainError {
     ScopeWidened,
     /// the root key appears as a certificate subject
     RootAsSubject,
+    /// a certificate has no validity window: both `not_before_ms` and `not_after_ms` are required
+    Unbounded,
+    /// a certificate is valid for longer than [`MAX_CERTIFICATE_MS`]
+    TooLong,
+    /// a certificate grants its role something that role may never hold (a box connector that may pair or approve)
+    RoleNotPermitted,
 }
 
 /// A chain that verified: who the principal is and what its leaf certificate says.
@@ -182,14 +202,26 @@ pub fn verify_chain(root: &PublicKey, chain: &[Certificate], now_ms: u64) -> Res
             return Err(ChainError::Issuer);
         }
         verify(&issuer, CERT_LABEL, &cert.body, &cert.signature).map_err(|_| ChainError::Signature)?;
-        if now_ms < body.not_before_ms || (body.not_after_ms != 0 && now_ms > body.not_after_ms) {
+        // A real window on every certificate, so expiry is the revocation that works with nobody online.
+        if body.not_before_ms == 0 || body.not_after_ms == 0 {
+            return Err(ChainError::Unbounded);
+        }
+        if body.not_after_ms <= body.not_before_ms || body.not_after_ms - body.not_before_ms > MAX_CERTIFICATE_MS {
+            return Err(ChainError::TooLong);
+        }
+        if now_ms < body.not_before_ms || now_ms > body.not_after_ms {
             return Err(ChainError::Expired);
+        }
+        if body.role() == Role::BoxConnector
+            && (body.may_pair || body.scopes.iter().any(|s| BOX_CONNECTOR_FORBIDS.contains(&s.as_str())))
+        {
+            return Err(ChainError::RoleNotPermitted);
         }
         if let Some(p) = parent {
             if !p.may_pair {
                 return Err(ChainError::NotDelegated);
             }
-            if p.not_after_ms != 0 && (body.not_after_ms == 0 || body.not_after_ms > p.not_after_ms) {
+            if body.not_after_ms > p.not_after_ms {
                 return Err(ChainError::OutlivesIssuer);
             }
             if body.scopes.iter().any(|s| !p.scopes.contains(s)) {
