@@ -29,6 +29,7 @@ fn what_the_tags_say_is_what_the_frame_says() {
             let decoded = EventFrame::decode(bytes.as_slice()).expect("the fixture decodes");
             assert_eq!(read.kind, decoded.kind.as_deref(), "{kind} info={info}");
             assert_eq!(read.has_info, decoded.info.is_some(), "{kind} info={info}");
+            assert_eq!(read.at_ms, decoded.at_ms.map(|ms| ms as u64), "{kind} at_ms");
             assert!(read.readable);
         }
     }
@@ -99,6 +100,7 @@ fn a_field_this_connector_does_not_know_is_skipped_whatever_its_wire_type() {
     let read = read(&bytes);
     assert!(read.readable, "unknown fields are skipped, not refused");
     assert_eq!(read.kind, Some("sample"));
+    assert_eq!(read.at_ms, Some(1_800_000_000_000), "a field after the ones we read is still skipped correctly");
 }
 
 #[test]

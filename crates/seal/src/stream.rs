@@ -270,6 +270,16 @@ impl StreamReader {
         true
     }
 
+    /// The stream this reader is for: whose it is, and which channel.
+    pub fn publisher(&self) -> PrincipalId {
+        self.publisher
+    }
+
+    /// The channel this reader is for, for a subscriber holding several.
+    pub fn channel(&self) -> &[u8] {
+        &self.channel
+    }
+
     /// Where this reader has read to. A resubscribe should ask the hub for what follows.
     pub fn counter(&self) -> u64 {
         self.last

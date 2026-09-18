@@ -65,6 +65,7 @@ Which repository owns which wire schema, and how the others pin it: [`docs/SCHEM
 | `crates/relay` | the routing core with no IO: accounts, presence, streams and rings, backpressure, limits |
 | `proto/` | the hub's wire schema (rules in [`docs/PROTOCOL.md`](docs/PROTOCOL.md)); `proto/vendor/` holds pinned copies of other repos' schemas |
 | `crates/box` | the box connector's reading of an `/api/events` frame: which channel it belongs on, without decoding it |
+| `crates/connector` | the box connector: reads a box's `/api/events` and republishes each frame through a hub, sealed and unchanged |
 | `crates/client` | a client: the authenticated handshake, subscriptions, sealed commands, and the end-to-end tests that drive a real hub |
 | `vectors/` | what the two implementations are checked against, each way ([docs/VECTORS.md](docs/VECTORS.md)) |
 | `crates/loadgen` | `wmlhub-loadgen`: throughput, latency percentiles, CPU per delivery, memory per connection ([docs/perf](docs/perf/README.md)) |

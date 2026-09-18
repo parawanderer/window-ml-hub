@@ -1,0 +1,27 @@
+[package]
+name = "wmlhub-connector"
+version = "0.1.0"
+description = "The box connector: reads a box's /api/events and republishes it through a hub, sealed"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "time"] }
+wmlhub-box = { path = "../box" }
+wmlhub-client = { path = "../client" }
+wmlhub-seal = { path = "../seal" }
+wmlhub-frame = { path = "../frame" }
+wmlhub-proto = { path = "../proto" }
+
+[dev-dependencies]
+prost = "0.14"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+wmlhub = { path = "../hub" }
+wmlhub-box = { path = "../box", features = ["testing"] }
+wmlhub-keys = { path = "../keys" }
+
+[lints]
+workspace = true
