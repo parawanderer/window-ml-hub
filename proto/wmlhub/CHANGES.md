@@ -17,6 +17,21 @@ Everything so far is additive: a peer that has never seen a field does not send 
 field ignores it. Nothing here has required a reader to change to keep working; two have required a reader to change
 to keep being CORRECT, and they are marked.
 
+## v0.3.0 — `install` is never delegable
+
+**A verifier must add `install` to its never-delegable list**, or it accepts a delegated certificate carrying it that
+the hub refuses. Marked, because the list is in no `.proto`: it is `NEVER_DELEGABLE` in `crates/keys` and the same
+list in window-ml's `keys.ts`, and a name on one side only is a divergence with no failing test anywhere.
+
+- `install`: grant a runtime a capability that outlives the session (a Python package, later an MCP server or a
+  container image). Only the root may grant it. The reason is stronger than persistence: **revocation cannot undo an
+  install**, so a delegate minting it would create effects that outlive both the delegation and its own revocation.
+- A delegate MAY renew a certificate carrying it, exactly as it may renew `approve`. Renewal re-issues a grant the
+  root already made and creates nothing new, so the reason `install` is never delegable does not apply to keeping it
+  alive. (`may_revoke` is the one power a delegate may not renew, because its value is exclusivity.)
+- No schema change, and no certificate anywhere carried `install` when this landed, so there was no moment at which
+  the two lists could disagree about a real device. window-ml landed its half first for that reason.
+
 ## v0.2.0 — `may_revoke` and `renews` on `CertificateBody`
 
 **A verifier must implement renewal or it will refuse a renewed device.** Marked, because nothing breaks until a

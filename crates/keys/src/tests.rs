@@ -554,3 +554,31 @@ fn resign(issuer: &Identity, body: CertificateBody) -> Certificate {
     let signature = issuer.sign(CERT_LABEL, &body);
     Certificate { body, signature }
 }
+
+#[test]
+fn install_is_the_roots_to_grant_by_name() {
+    // The loop above proves whatever is in NEVER_DELEGABLE is enforced; it would still pass if `install` were taken
+    // out. The NAME is what has to match window-ml's keys.ts, so it is pinned here on its own.
+    assert!(NEVER_DELEGABLE.contains(&scope::INSTALL), "install is never delegable");
+    assert_eq!(scope::INSTALL, "install", "the name window-ml checks for");
+
+    let (root, laptop, phone) = (id(1), id(2), id(3));
+    let held = vec![scope::VIEW.to_owned(), scope::INSTALL.to_owned()];
+    let delegate =
+        issue_ok(&root, &CertSpec { may_pair: true, scopes: held.clone(), not_after_ms: NOW + 9_000, ..spec(&laptop) });
+    let leaf = issue_ok(&laptop, &CertSpec { scopes: held.clone(), ..spec(&phone) });
+    assert_eq!(
+        verify_chain(&root.public(), &[leaf, delegate.clone()], NOW).unwrap_err(),
+        ChainError::NotDelegable,
+        "a delegate that may pair and holds install still cannot hand it out"
+    );
+
+    // Renewal is different, and deliberately so: the root already granted this subject `install`, and a renewal
+    // re-issues that grant unchanged. It creates nothing new, unlike minting, so the reason install is never
+    // delegable does not apply to keeping it alive. `may_revoke` is the one power a delegate may not renew, because
+    // its value is exclusivity. `install` has no such property.
+    let granted = issue_ok(&root, &CertSpec { scopes: held, ..spec(&phone) });
+    let renewed = renew(&laptop, &granted, NOW, NOW + 5_000).unwrap();
+    let out = verify_chain(&root.public(), &[renewed, delegate], NOW).unwrap();
+    assert!(out.leaf.scopes.iter().any(|s| s == scope::INSTALL));
+}
