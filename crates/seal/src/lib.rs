@@ -20,6 +20,7 @@ use hpke::kem::X25519HkdfSha256;
 use hpke::{Deserializable, Kem as _, OpModeR, OpModeS, Serializable};
 use wmlhub_keys::{ChainError, Identity, PublicKey, principal_id, sign_command, verify_chain, verify_command};
 
+pub use pairing::{open_pairing_answer, seal_pairing_answer};
 pub use stream::{
     CHANNEL_BYTES, ChannelKey, Grant, MAX_STREAM_FRAME_BYTES, Published, StreamError, StreamKey, StreamReader,
     open_grant, seal_frame, wrap_key,
@@ -145,6 +146,34 @@ fn seal(
             .encode_to_vec();
     let sealed = hpke_seal(SEAL_INFO_LABEL, &sender, to, &signed).map_err(SealError::Hpke)?;
     Ok((sealed, nonce))
+}
+
+/// Seal to a bare agreement key, with no principal ids bound in: pairing is the one path where neither side has a
+/// certificate for the other yet, so there are no ids to bind. What binds it instead is the person's fingerprint
+/// comparison over the very key this seals to.
+pub(crate) fn hpke_seal_raw(label: &[u8], to: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, hpke::HpkeError> {
+    let pk = <X25519HkdfSha256 as hpke::Kem>::PublicKey::from_bytes(to)?;
+    let (enc, ciphertext) =
+        hpke::single_shot_seal::<AesGcm256, HkdfSha256, X25519HkdfSha256>(&OpModeS::Base, &pk, label, plaintext, &[])?;
+    Ok(Sealed { enc: enc.to_bytes().to_vec(), ciphertext }.encode_to_vec())
+}
+
+/// Open what `hpke_seal_raw` sealed.
+pub(crate) fn hpke_open_raw(label: &[u8], agreement: &AgreementKey, sealed: &[u8]) -> Result<Vec<u8>, OpenError> {
+    if sealed.len() > MAX_SEALED_BYTES {
+        return Err(OpenError::TooLarge);
+    }
+    let sealed = Sealed::decode(sealed).map_err(|_| OpenError::Malformed)?;
+    let enc = pairing::enc_of(&sealed)?;
+    hpke::single_shot_open::<AesGcm256, HkdfSha256, X25519HkdfSha256>(
+        &OpModeR::Base,
+        &agreement.secret,
+        &enc,
+        label,
+        &sealed.ciphertext,
+        &[],
+    )
+    .map_err(|_| OpenError::Decrypt)
 }
 
 pub(crate) fn hpke_seal(
@@ -388,6 +417,7 @@ impl ReplayWindow {
     }
 }
 
+mod pairing;
 mod stream;
 
 #[cfg(test)]
