@@ -17,6 +17,18 @@ stream (`src/proto/chat.proto.pin.json`); every schema here follows the same pat
 **Checking pins**: `tools/check-pins.sh` compares every vendored file's git blob id with its `.pin.json` (CI runs it);
 `tools/check-pins.sh --upstream` also asks GitHub whether the pinned branch has moved on.
 
+**Announcing a change to a schema this repository OWNS**: [`../proto/wmlhub/CHANGES.md`](../proto/wmlhub/CHANGES.md),
+and `tools/check-schema-changes.sh` refuses a pull request that touches `proto/wmlhub/` without touching it. That is
+a gate rather than a habit for the reason the reader cannot fix from their side: a schema change is INVISIBLE
+downstream until something needs the field, because their code is correct against the schema it has and simply never
+asks for what it does not know about. window-ml carried a `Presence` with no `chain` for a fortnight that way, and
+the same stale copy had the certificate-window rule backwards, which would have made it accept a certificate this
+design refuses.
+
+The two halves are meant to be used together, and neither depends on the other: a reader runs `--upstream` on a
+schedule to learn THAT something moved without anyone remembering to tell them, and reads `CHANGES.md` to learn
+WHAT moved and whether they care.
+
 **The hub never pins a payload schema.** It parses only the envelope, and not having payload schemas as dependencies
 is part of how that stays true. The box connector is the exception, and it is a separate mode: it holds the
 plaintext before encrypting it, and needs the frame kinds to coalesce samples and find the box id in `hello`.
