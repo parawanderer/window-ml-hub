@@ -388,7 +388,8 @@ fn ping_is_answered_and_an_unknown_frame_is_unsupported() {
 fn a_hub_to_peer_frame_from_a_peer_closes_it() {
     let mut h = hub();
     let c = join(&mut h, "alice", "p", Role::Client);
-    let forged = frame(Body::Presence(v1::Presence { principal: b"x".to_vec(), role: 1, online: true }));
+    let forged =
+        frame(Body::Presence(v1::Presence { principal: b"x".to_vec(), role: 1, online: true, chain: Vec::new() }));
     let actions = h.receive(c, forged);
     assert_eq!(closed(&actions), [(c, "error Invalid ref=0".to_string())]);
 }
@@ -580,4 +581,69 @@ fn every_epoch_a_hub_chooses_fits_in_a_double() {
             assert_eq!(epoch as f64 as u64, epoch, "epoch {epoch} does not survive a double");
         }
     }
+}
+
+#[test]
+fn presence_carries_the_chain_of_whoever_came_online() {
+    // A publisher needs the leaf's agreement key to wrap a stream key to a device, so knowing a phone is online is of
+    // no use without it.
+    let mut h = hub();
+    let chain = vec![Certificate { body: vec![1; 200], signature: vec![2; 64] }];
+    let phone_hello = v1::Hello { chain: chain.clone(), ..hello("phone", Role::Client) };
+    let (phone, _) = h.connect(acct("a"), &phone_hello, NOW).unwrap();
+    // connected without draining: the presence backfill arrives in the same burst as the welcome
+    let (rt, _) = h.connect(acct("a"), &hello("rt", Role::Runtime), NOW).unwrap();
+
+    // the runtime is told about the phone as it joins, with the chain
+    let seen = drain(&mut h, rt);
+    let presence = seen.iter().find_map(|f| match &f.body {
+        Some(Body::Presence(p)) if p.principal == b"phone" => Some(p.clone()),
+        _ => None,
+    });
+    assert_eq!(presence.expect("presence for the phone").chain, chain, "as the backfill of who is already here");
+
+    // and the phone is told about the runtime as IT joins
+    h.take_outbound(phone, usize::MAX);
+    let joining = v1::Hello { chain: chain.clone(), ..hello("laptop", Role::Client) };
+    h.connect(acct("a"), &joining, NOW).unwrap();
+    let live = drain(&mut h, phone);
+    let presence = live.iter().find_map(|f| match &f.body {
+        Some(Body::Presence(p)) if p.principal == b"laptop" => Some(p.clone()),
+        _ => None,
+    });
+    assert_eq!(presence.expect("presence for the laptop").chain, chain, "and as it arrives");
+}
+
+#[test]
+fn a_chain_too_large_to_carry_is_left_out_rather_than_echoed() {
+    // Presence goes to every other connection of the account, and development mode verifies nothing, so an oversized
+    // chain logs in without being passed along.
+    let mut h = hub();
+    let huge = vec![Certificate { body: vec![1; 4_000], signature: vec![2; 64] }];
+    let phone_hello = v1::Hello { chain: huge, ..hello("phone", Role::Client) };
+    h.connect(acct("a"), &phone_hello, NOW).unwrap();
+    let (rt, _) = h.connect(acct("a"), &hello("rt", Role::Runtime), NOW).unwrap();
+    let seen = drain(&mut h, rt);
+    let presence = seen.iter().find_map(|f| match &f.body {
+        Some(Body::Presence(p)) if p.principal == b"phone" => Some(p.clone()),
+        _ => None,
+    });
+    assert!(presence.expect("presence for the phone").chain.is_empty(), "it logged in; its chain was not echoed");
+}
+
+#[test]
+fn a_departure_carries_no_chain() {
+    let mut h = hub();
+    let chain = vec![Certificate { body: vec![1; 200], signature: vec![2; 64] }];
+    let phone_hello = v1::Hello { chain, ..hello("phone", Role::Client) };
+    let (phone, _) = h.connect(acct("a"), &phone_hello, NOW).unwrap();
+    let rt = join(&mut h, "a", "rt", Role::Runtime);
+    h.take_outbound(rt, usize::MAX);
+    h.close(phone, None);
+    let seen = drain(&mut h, rt);
+    let presence = seen.iter().find_map(|f| match &f.body {
+        Some(Body::Presence(p)) if !p.online => Some(p.clone()),
+        _ => None,
+    });
+    assert!(presence.expect("an offline presence").chain.is_empty(), "a departure says only that");
 }

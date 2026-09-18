@@ -122,6 +122,17 @@ contract's `epoch`/`cursor`, inside the ciphertext, are the runtime's own and su
   runtime at least that often.
 - An unknown frame body decodes as no body and is answered `Error{UNSUPPORTED}`; an unknown field is ignored.
 
+## Presence carries a chain
+
+- **A presence that says a principal came online carries the chain it presented**, leaf first; one that says it went
+  away carries nothing. Certificates are public — they are what the hub verifies with public keys only — and a
+  publisher needs the leaf's agreement key to wrap a stream key to a device. Without it a runtime would know a phone
+  is online and have no way to seal anything to it.
+- **A subscriber verifies that chain itself**, against the account root it already holds. The hub passing it along is
+  a convenience, not a claim: nothing about presence is trusted.
+- A chain larger than two certificates at their limits is left out rather than echoed, since presence goes to every
+  other connection of the account.
+
 ## Pairing
 
 - **A principal with no certificate may send exactly one thing**: a `PairOffer`, in place of its `Hello`. The hub

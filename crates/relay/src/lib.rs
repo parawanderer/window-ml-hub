@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use wmlhub_proto::bytes::Bytes;
 
-use wmlhub_proto::v1::{self, Envelope, Frame, Kind, Role, envelope::To, error::Code, frame::Body};
+use wmlhub_proto::v1::{self, Certificate, Envelope, Frame, Kind, Role, envelope::To, error::Code, frame::Body};
 
 pub use limits::Limits;
 use queue::{Outbound, SlowConsumer};
@@ -34,6 +34,20 @@ pub const THROTTLE_NOTICE_MIN_WAIT_MS: u64 = 100;
 /// The largest integer a double holds exactly (2^53 - 1). Values the hub CHOOSES stay inside it, so every client
 /// language can carry them without loss; the wire types are still 64-bit.
 pub const MAX_EXACT_IN_A_DOUBLE: u64 = (1 << 53) - 1;
+
+/// The most a chain may be, to be carried in presence: what two certificates at their own limit come to, with room
+/// for the encoding. A hello over this still logs in; its chain simply is not passed along, because presence is
+/// echoed to every other connection of the account and development mode verifies nothing.
+const MAX_PRESENCE_CHAIN_BYTES: usize = 2 * 1_100;
+
+/// The chain as presence will carry it, or nothing at all.
+fn presentable(chain: &[Certificate]) -> Vec<Certificate> {
+    let total: usize = chain.iter().map(|c| c.body.len() + c.signature.len()).sum();
+    if chain.len() > 2 || total > MAX_PRESENCE_CHAIN_BYTES {
+        return Vec::new();
+    }
+    chain.to_vec()
+}
 
 /// The protocol major this relay speaks.
 pub const PROTOCOL: u32 = 1;
@@ -85,6 +99,10 @@ pub struct Taken {
 #[derive(Debug)]
 struct Conn {
     principal: Vec<u8>,
+    /// What this principal presented, kept so presence can carry it: a publisher needs the leaf's agreement key to
+    /// wrap a stream key to a device. Empty when it is over what a verified chain could be, since this is echoed to
+    /// every other connection of the account and development mode verifies nothing.
+    chain: Vec<Certificate>,
     out: Outbound,
     subs: HashSet<StreamKey>,
     /// a `Wake` was sent and this connection's queue has not been seen empty since
@@ -251,6 +269,7 @@ impl Hub {
         let mut fx = Effects::default();
         let mut conn = Conn {
             principal: hello.principal.clone(),
+            chain: presentable(&hello.chain),
             out: Outbound::default(),
             subs: HashSet::new(),
             armed: false,
@@ -259,8 +278,9 @@ impl Hub {
         let welcome = v1::Welcome { protocol: PROTOCOL, server_time_ms: now_ms, limits: Some(self.limits.announce()) };
         // A fresh queue holds these without trouble; a failure here would be a limits misconfiguration.
         let _ = conn.out.push_frame(&Frame { body: Some(Body::Welcome(welcome)) }, &self.limits);
-        for (principal, (_, r)) in &acct.online {
-            let p = v1::Presence { principal: principal.clone(), role: *r as i32, online: true };
+        for (principal, (other, r)) in &acct.online {
+            let chain = acct.conns.get(other).map(|c| c.chain.clone()).unwrap_or_default();
+            let p = v1::Presence { principal: principal.clone(), role: *r as i32, online: true, chain };
             let _ = conn.out.push_frame(&Frame { body: Some(Body::Presence(p)) }, &self.limits);
         }
         let others: Vec<ConnId> = acct.conns.keys().copied().collect();
@@ -269,7 +289,12 @@ impl Hub {
         acct.online.insert(hello.principal.clone(), (id, role));
         self.conn_account.insert(id, account.clone());
 
-        let presence = v1::Presence { principal: hello.principal.clone(), role: role as i32, online: true };
+        let presence = v1::Presence {
+            principal: hello.principal.clone(),
+            role: role as i32,
+            online: true,
+            chain: presentable(&hello.chain),
+        };
         for other in others {
             self.enqueue(&account, other, Frame { body: Some(Body::Presence(presence.clone())) }, &mut fx);
         }
@@ -619,7 +644,8 @@ impl Hub {
         if acct.conns.is_empty() && acct.streams.is_empty() {
             self.accounts.remove(&account);
         }
-        let presence = v1::Presence { principal: c.principal, role: role as i32, online: false };
+        // Nothing carries a chain on the way out: whoever wanted it has it, and a departure says only that.
+        let presence = v1::Presence { principal: c.principal, role: role as i32, online: false, chain: Vec::new() };
         for other in others {
             self.enqueue(&account, other, Frame { body: Some(Body::Presence(presence.clone())) }, fx);
         }
