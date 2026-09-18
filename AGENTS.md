@@ -27,6 +27,10 @@ Read before changing the relay: [`RUNTIME_HUB.md`](https://github.com/parawander
   not be able to starve another, of memory or of time: work an account causes is charged to its budget (rate.rs),
   including frames the relay queues on its behalf. A new code path that makes the relay queue frames goes through
   `Conn::arm`, which counts them.
+- **A bound that keys on the source address cannot be a default here.** The hub is meant to run behind Tailscale or
+  Caddy, where every client arrives from the proxy's address, so one bucket would be shared by a household. The
+  connection rate exists and is off; what bounds the pre-authentication surface without an address is
+  `max_pending_sockets`.
 - **Anything the hub CHOOSES fits in a double** (`MAX_EXACT_IN_A_DOUBLE`). The browser's connector holds a `seq` or
   an `epoch` in a double, and a full 64-bit epoch cannot round-trip: the TypeScript decoder threw on the first
   real connection. The wire types stay 64-bit.

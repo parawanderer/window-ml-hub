@@ -4,6 +4,7 @@
 //! connections, the `Hello` handshake, decoding and encoding frames, one writer task per connection draining its
 //! queue, pings, and timeouts. It never looks inside `Envelope.payload`, and logs no frame contents.
 
+pub mod arrivals;
 pub mod registry;
 
 use std::collections::HashMap;
@@ -62,6 +63,15 @@ pub struct Config {
     pub write_budget: usize,
     /// Sockets open at once, before or after `Hello`.
     pub max_sockets: usize,
+    /// Sockets open at once that have NOT yet said who they are. Every other bound needs a `Hello` first, so this is
+    /// what makes the pre-authentication surface finite: at most this many sockets can be reading a hello, holding a
+    /// read buffer, or verifying a chain at any moment.
+    pub max_pending_sockets: usize,
+    /// The largest first message accepted, before anything in it is decoded. A hello is a signature and a chain, a
+    /// kilobyte or two; nothing legitimate is near this.
+    pub max_hello_bytes: usize,
+    /// How often one source address may open a connection (`arrivals`).
+    pub arrivals: arrivals::Arrivals,
     /// Independent relay shards, each with its own lock; an account lives in exactly one. 0 picks four per core.
     pub shards: usize,
 }
@@ -76,6 +86,9 @@ impl Default for Config {
             idle_timeout: Duration::from_secs(60),
             write_budget: 256 << 10,
             max_sockets: 10_000,
+            max_pending_sockets: 256,
+            max_hello_bytes: 64 << 10,
+            arrivals: arrivals::Arrivals::default(),
             shards: 0,
         }
     }
@@ -110,6 +123,8 @@ struct Shared {
     config: Config,
     /// the monotonic clock accounts' work budgets run on
     started: Instant,
+    /// how much of its connection allowance each source address has left
+    arrivals: Mutex<arrivals::Gate>,
 }
 
 /// A poisoned lock means a panic mid-update; the relay's state is then not trustworthy, so fail loudly.
@@ -242,10 +257,13 @@ pub async fn serve(listener: TcpListener, config: Config, epoch_seed: u64) -> io
         .collect::<io::Result<Vec<_>>>()?
         .into_boxed_slice();
     let sockets = Arc::new(Semaphore::new(config.max_sockets));
+    // Sockets that have not authenticated yet are capped separately: they are the only ones a stranger can open.
+    let pending = Arc::new(Semaphore::new(config.max_pending_sockets));
     let shared = Arc::new(Shared {
         shards,
         accounts: AtomicUsize::new(0),
         shard_hasher: RandomState::new(),
+        arrivals: Mutex::new(arrivals::Gate::new(config.arrivals)),
         config,
         started: Instant::now(),
     });
@@ -255,15 +273,23 @@ pub async fn serve(listener: TcpListener, config: Config, epoch_seed: u64) -> io
             tracing::warn!(%peer, "socket limit reached; refusing");
             continue;
         };
+        if !lock(&shared.arrivals).admit(peer.ip(), Instant::now()) {
+            tracing::debug!(%peer, "connecting too often; refusing");
+            continue;
+        }
+        let Ok(pending_permit) = pending.clone().try_acquire_owned() else {
+            tracing::warn!(%peer, "too many sockets are still unauthenticated; refusing");
+            continue;
+        };
         let shared = shared.clone();
         tokio::spawn(async move {
-            connection(shared, tcp, peer.ip()).await;
+            connection(shared, tcp, peer.ip(), pending_permit).await;
             drop(permit);
         });
     }
 }
 
-async fn connection(shared: Arc<Shared>, tcp: TcpStream, address: IpAddr) {
+async fn connection(shared: Arc<Shared>, tcp: TcpStream, address: IpAddr, pending: tokio::sync::OwnedSemaphorePermit) {
     // Frames are small and latency-sensitive; Nagle would hold one back waiting for an ACK.
     let _ = tcp.set_nodelay(true);
     let limits = &shared.config.limits;
@@ -293,6 +319,10 @@ async fn connection(shared: Arc<Shared>, tcp: TcpStream, address: IpAddr) {
     }
     let first = tokio::time::timeout(shared.config.hello_timeout, stream.next()).await;
     let Ok(Some(Ok(Message::Binary(bytes)))) = first else { return };
+    if bytes.len() > shared.config.max_hello_bytes {
+        let _ = send(&mut sink, &[error_frame(Code::Limit, "hello too large")], max_frame).await;
+        return;
+    }
     let hello_bytes = bytes.len();
     let mut frames = match decode_frames_shared(bytes, max_frame) {
         Ok(f) => f.into_iter(),
@@ -321,6 +351,8 @@ async fn connection(shared: Arc<Shared>, tcp: TcpStream, address: IpAddr) {
             return;
         }
     };
+    // Authenticated: this socket is no longer part of the surface a stranger can occupy, so its place goes back.
+    drop(pending);
     tracing::info!(conn = id, shard, role = ?hello.role(), "connected");
 
     let mut writer = tokio::spawn(write_loop(shared.clone(), shard, id, handle, sink));

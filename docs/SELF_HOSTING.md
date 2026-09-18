@@ -125,6 +125,10 @@ Every setting is an environment variable. The compose file sets the first four; 
 | `WMLHUB_ACCOUNT_BYTES_PER_SECOND` | `8388608` (8 MiB) | work one account may cause per second; past it the hub reads that account more slowly, dropping nothing |
 | `WMLHUB_ACCOUNT_BURST_BYTES` | `33554432` (32 MiB) | how much of that work may arrive at once |
 | `WMLHUB_SHARDS` | `0` (four per core) | independent relay locks; accounts are spread across them |
+| `WMLHUB_MAX_PENDING_SOCKETS` | `256` | sockets that have not authenticated yet, at once |
+| `WMLHUB_MAX_HELLO_BYTES` | `65536` | the largest first message accepted, before anything in it is decoded |
+| `WMLHUB_CONNECTIONS_PER_MINUTE` | `0` (off) | connections one source address may open; leave off behind a proxy, set it when the hub is exposed directly |
+| `WMLHUB_CONNECTION_BURST` | `0` | how much of that allowance may be spent at once |
 
 `docker compose exec hub wmlhub serve --help` prints the same list.
 

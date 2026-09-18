@@ -21,7 +21,13 @@ async fn start(config: wmlhub::Config) -> String {
 }
 
 async fn open(url: &str) -> Ws {
-    tokio_tungstenite::connect_async(url).await.unwrap().0
+    try_open(url).await.expect("the hub accepted the connection")
+}
+
+/// Connect, or the error the hub answered with. A hub that refuses before the websocket upgrade — which is where it
+/// refuses anything it can decide without reading — fails the connect itself rather than closing a live socket.
+async fn try_open(url: &str) -> Result<Ws, tokio_tungstenite::tungstenite::Error> {
+    tokio_tungstenite::connect_async(url).await.map(|(ws, _)| ws)
 }
 
 async fn send(ws: &mut Ws, frames: &[Frame]) {
@@ -322,4 +328,95 @@ async fn an_account_over_its_work_rate_is_slowed_loses_nothing_and_slows_no_othe
     // and no longer: a budget that never refills (two clocks mixed up, say) makes every message wait longer than the last
     assert!(slow < Duration::from_millis(3_500), "40 KB at 20 KB/s took {slow:?}");
     assert!(fast < Duration::from_millis(500), "the other account waited {fast:?}");
+}
+
+#[tokio::test]
+async fn a_hello_larger_than_the_limit_is_refused_before_it_is_decoded() {
+    let mut config = wmlhub::Config { max_hello_bytes: 4_096, ..Default::default() };
+    config.limits.max_frame_bytes = 1 << 20;
+    let url = start(config).await;
+    let mut ws = open(&url).await;
+    // a frame of the right shape, padded past the limit: nothing about it is read
+    let huge = Frame {
+        body: Some(Body::Hello(v1::Hello {
+            protocol: 1,
+            principal: b"phone".to_vec(),
+            role: Role::Client as i32,
+            account_credential: vec![7; 8_192],
+            ..Default::default()
+        })),
+    };
+    send(&mut ws, &[huge]).await;
+    let answer = expect(&mut ws, |b| matches!(b, Body::Error(_))).await;
+    assert!(matches!(&answer, Body::Error(e) if e.code() == Code::Limit && e.message == "hello too large"));
+}
+
+#[tokio::test]
+async fn a_hello_inside_the_limit_still_works() {
+    let url = start(wmlhub::Config { max_hello_bytes: 4_096, ..Default::default() }).await;
+    let mut ws = join(&url, "alice", "phone", Role::Client).await;
+    send(&mut ws, &[subscribe("rt", "s1")]).await;
+    expect(&mut ws, |b| matches!(b, Body::Backfilled(_))).await;
+}
+
+#[tokio::test]
+async fn connecting_too_often_from_one_address_is_refused_and_the_rest_still_connect() {
+    // Off by default (a proxy would share one bucket with everyone behind it), so this turns it on.
+    let arrivals = wmlhub::arrivals::Arrivals { per_minute: 60, burst: 3 };
+    let url = start(wmlhub::Config { arrivals, ..Default::default() }).await;
+
+    // the burst, then one too many: the refusal is a closed socket, since nothing has been said yet
+    let mut held = Vec::new();
+    for i in 0..3 {
+        held.push(join(&url, "alice", &format!("p{i}"), Role::Client).await);
+    }
+    assert!(try_open(&url).await.is_err(), "the fourth connection in a burst of three is refused");
+
+    // and the ones that got in are untouched
+    for ws in &mut held {
+        send(ws, &[Frame { body: Some(Body::Ping(v1::Ping { nonce: 9 })) }]).await;
+        let pong = expect(ws, |b| matches!(b, Body::Pong(_))).await;
+        assert!(matches!(pong, Body::Pong(p) if p.nonce == 9));
+    }
+}
+
+#[tokio::test]
+async fn a_socket_that_never_says_hello_holds_a_place_only_until_it_times_out() {
+    let config =
+        wmlhub::Config { max_pending_sockets: 1, hello_timeout: Duration::from_millis(200), ..Default::default() };
+    let url = start(config).await;
+
+    // one socket sits there saying nothing, which is the whole pre-authentication surface
+    let mut squatter = open(&url).await;
+    expect(&mut squatter, |b| matches!(b, Body::Challenge(_))).await;
+    assert!(try_open(&url).await.is_err(), "while the one place is taken, another is refused");
+
+    // its hello timeout ends it, and the place comes back
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let mut ws = join(&url, "alice", "phone", Role::Client).await;
+    send(&mut ws, &[Frame { body: Some(Body::Ping(v1::Ping { nonce: 1 })) }]).await;
+    expect(&mut ws, |b| matches!(b, Body::Pong(_))).await;
+}
+
+#[tokio::test]
+async fn an_authenticated_connection_gives_its_place_back_at_once() {
+    let url = start(wmlhub::Config { max_pending_sockets: 1, ..Default::default() }).await;
+    // each of these authenticates, so the single pending place is free again every time
+    for i in 0..5 {
+        let mut ws = join(&url, "alice", &format!("p{i}"), Role::Client).await;
+        send(&mut ws, &[Frame { body: Some(Body::Ping(v1::Ping { nonce: i as u64 })) }]).await;
+        expect(&mut ws, |b| matches!(b, Body::Pong(_))).await;
+    }
+}
+
+#[tokio::test]
+async fn the_connection_rate_is_off_by_default_so_a_proxys_address_is_not_one_bucket() {
+    // Every client behind Tailscale or Caddy arrives from the same address. A default rate would throttle a
+    // household to one allowance, so the default admits everything and an operator exposing the hub sets a rate.
+    let url = start(wmlhub::Config::default()).await;
+    let mut held = Vec::new();
+    for i in 0..40 {
+        held.push(join(&url, "alice", &format!("p{i}"), Role::Client).await);
+    }
+    assert_eq!(held.len(), 40);
 }
