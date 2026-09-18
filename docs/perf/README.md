@@ -217,6 +217,16 @@ No cost when under budget: `fanout --accounts 50 --subscribers 5 --channels 4 --
 1.9 MiB/s of work per account), before -> after, three rounds each: hub CPU per 1k deliveries 4.6-4.8 -> 4.6-4.9 us,
 transit p50 624-634 -> 623-634 us, p99 1.4-2.4 -> 1.5-1.9 ms.
 
+### The pre-authentication caps do not cost the idle case
+
+`max_pending_sockets` (256) bounds sockets that have not authenticated, and every connection passes through it, so
+the 10k-idle scenario is the one to check it against. Unchanged after it landed: 100 connections at ~23 KB each,
+1,000 at ~15.8 KB, 10,000 at ~15.1 KB and 150 MB resident, the same figures as before.
+
+A handshake holds its place for as long as it takes to verify a chain (about 100 us in keys mode), so 256 at once is
+a few thousand logins a second: a hub restart with ten thousand clients reconnecting is bounded by that rather than
+blocked by it.
+
 ## Next (from the profile)
 
 1. ~~Shard the relay by account, so tenants do not share a lock.~~ Done, above.
