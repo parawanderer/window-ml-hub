@@ -342,7 +342,7 @@ async fn a_device_the_root_allowed_to_pair_hands_over_its_own_certificate_too() 
     let mut pairing = Pairing::offer(&url, &code.hash(), offer).await.unwrap();
 
     ph.pairing_offered(&code.hash()).await.unwrap();
-    let certificate = issue(
+    let certificate = issue_ok(
         &delegate.identity,
         &CertSpec {
             subject: new_identity.public(),
