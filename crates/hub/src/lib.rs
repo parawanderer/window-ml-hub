@@ -73,6 +73,10 @@ pub struct Config {
     pub max_hello_bytes: usize,
     /// How often one source address may open a connection (`arrivals`).
     pub arrivals: arrivals::Arrivals,
+    /// Sockets waiting for a pairing answer at once. One holds its place for as long as a slot lives (minutes,
+    /// because a person is carrying a code to another device), so pairing gets its own cap rather than sharing the
+    /// one ordinary logins pass through: a stranger opening pairing sockets cannot keep anybody from logging in.
+    pub max_pairing_sockets: usize,
     /// Independent relay shards, each with its own lock; an account lives in exactly one. 0 picks four per core.
     pub shards: usize,
 }
@@ -90,6 +94,7 @@ impl Default for Config {
             max_pending_sockets: 256,
             max_hello_bytes: 64 << 10,
             arrivals: arrivals::Arrivals::default(),
+            max_pairing_sockets: 64,
             shards: 0,
         }
     }
@@ -126,6 +131,8 @@ struct Shared {
     started: Instant,
     /// how much of its connection allowance each source address has left
     arrivals: Mutex<arrivals::Gate>,
+    /// the two blobs of each pairing in flight, which the hub holds and does not read
+    slots: Mutex<pairing::Slots>,
 }
 
 /// A poisoned lock means a panic mid-update; the relay's state is then not trustworthy, so fail loudly.
@@ -260,11 +267,13 @@ pub async fn serve(listener: TcpListener, config: Config, epoch_seed: u64) -> io
     let sockets = Arc::new(Semaphore::new(config.max_sockets));
     // Sockets that have not authenticated yet are capped separately: they are the only ones a stranger can open.
     let pending = Arc::new(Semaphore::new(config.max_pending_sockets));
+    let pairing_sockets = Arc::new(Semaphore::new(config.max_pairing_sockets));
     let shared = Arc::new(Shared {
         shards,
         accounts: AtomicUsize::new(0),
         shard_hasher: RandomState::new(),
         arrivals: Mutex::new(arrivals::Gate::new(config.arrivals)),
+        slots: Mutex::new(pairing::Slots::default()),
         config,
         started: Instant::now(),
     });
@@ -283,14 +292,21 @@ pub async fn serve(listener: TcpListener, config: Config, epoch_seed: u64) -> io
             continue;
         };
         let shared = shared.clone();
+        let pairing = pairing_sockets.clone();
         tokio::spawn(async move {
-            connection(shared, tcp, peer.ip(), pending_permit).await;
+            connection(shared, tcp, peer.ip(), pending_permit, pairing).await;
             drop(permit);
         });
     }
 }
 
-async fn connection(shared: Arc<Shared>, tcp: TcpStream, address: IpAddr, pending: tokio::sync::OwnedSemaphorePermit) {
+async fn connection(
+    shared: Arc<Shared>,
+    tcp: TcpStream,
+    address: IpAddr,
+    pending: tokio::sync::OwnedSemaphorePermit,
+    pairing_sockets: Arc<Semaphore>,
+) {
     // Frames are small and latency-sensitive; Nagle would hold one back waiting for an ACK.
     let _ = tcp.set_nodelay(true);
     let limits = &shared.config.limits;
@@ -332,9 +348,22 @@ async fn connection(shared: Arc<Shared>, tcp: TcpStream, address: IpAddr, pendin
             return;
         }
     };
-    let Some(Frame { body: Some(Body::Hello(hello)) }) = frames.next() else {
-        let _ = send(&mut sink, &[error_frame(Code::Invalid, "the first frame must be hello")], max_frame).await;
-        return;
+    let hello = match frames.next() {
+        Some(Frame { body: Some(Body::Hello(hello)) }) => hello,
+        // A principal with no certificate yet: it is here to be paired, which is the one other thing a stranger may
+        // do. It never joins the relay, so it is handled here and the socket ends with it.
+        Some(Frame { body: Some(Body::PairOffer(offer)) }) => {
+            let Ok(_permit) = pairing_sockets.try_acquire_owned() else {
+                let _ = send(&mut sink, &[error_frame(Code::Limit, "too many pairings at once")], max_frame).await;
+                return;
+            };
+            pairing_socket(&shared, &mut sink, &mut stream, offer, max_frame).await;
+            return;
+        }
+        _ => {
+            let _ = send(&mut sink, &[error_frame(Code::Invalid, "the first frame must be hello")], max_frame).await;
+            return;
+        }
     };
     let account = match authenticate(&shared.config.auth, &hello, &nonce, address) {
         Ok(a) => a,
@@ -384,6 +413,37 @@ async fn connection(shared: Arc<Shared>, tcp: TcpStream, address: IpAddr, pendin
                 let cost = share.saturating_add(chunk.len().saturating_mul(FRAME_COST_BYTES));
                 let now = shared.clock_ms();
                 // charged and handed over under one lock, so an unthrottled chunk costs no extra lock
+                // Pairing frames are the server's: an authenticated device fetching an offer or answering it. They are
+                // taken out here, so the relay only ever sees what it routes.
+                let chunk: Vec<Frame> = {
+                    let mut keep = Vec::with_capacity(chunk.len());
+                    for frame in chunk {
+                        match frame.body {
+                            Some(Body::PairFetch(fetch)) => {
+                                let answer = match lock(&shared.slots).offered(&fetch.code_hash, Instant::now()) {
+                                    Ok(offer) => {
+                                        Frame { body: Some(Body::Paired(v1::Paired { offer, answer: Vec::new() })) }
+                                    }
+                                    Err(_) => error_frame(Code::Unavailable, "no pairing is waiting under that code"),
+                                };
+                                shared.on_shard(shard, |hub| ((), hub.deliver(id, answer)));
+                            }
+                            Some(Body::PairAnswer(answer)) => {
+                                let reply = match lock(&shared.slots).answer(
+                                    &answer.code_hash,
+                                    answer.answer,
+                                    Instant::now(),
+                                ) {
+                                    Ok(()) => Frame { body: Some(Body::Paired(v1::Paired::default())) },
+                                    Err(refusal) => error_frame(Code::Unavailable, slot_refusal(refusal)),
+                                };
+                                shared.on_shard(shard, |hub| ((), hub.deliver(id, reply)));
+                            }
+                            other => keep.push(Frame { body: other }),
+                        }
+                    }
+                    keep
+                };
                 let (wait, unsent) = shared.on_shard(shard, |hub| {
                     let (wait, mut actions) = hub.charge(id, cost, now);
                     if wait > 0 {
@@ -489,6 +549,61 @@ async fn write_loop(shared: Arc<Shared>, shard: usize, id: ConnId, handle: Arc<H
             let _ = sink.close().await;
             return;
         }
+    }
+}
+
+/// A socket that offered a pairing: it holds the slot, waits for the answer, and ends. It never authenticates and
+/// never touches the relay, so the whole of what a stranger can do here is hold one slot and one socket, both capped.
+async fn pairing_socket(
+    shared: &Arc<Shared>,
+    sink: &mut Sink,
+    stream: &mut futures_util::stream::SplitStream<tokio_tungstenite::WebSocketStream<TcpStream>>,
+    offer: v1::PairOffer,
+    max_frame: usize,
+) {
+    let code_hash = offer.code_hash.clone();
+    let held = lock(&shared.slots).offer(&code_hash, offer.offer, Instant::now());
+    if let Err(refusal) = held {
+        let _ = send(sink, &[error_frame(Code::Limit, slot_refusal(refusal))], max_frame).await;
+        return;
+    }
+    // held: the person is now carrying the code to a device that can answer
+    if send(sink, &[Frame { body: Some(Body::Paired(v1::Paired::default())) }], max_frame).await.is_err() {
+        lock(&shared.slots).forget(&code_hash);
+        return;
+    }
+    let deadline = Instant::now() + pairing::SLOT_LIFETIME;
+    while Instant::now() < deadline {
+        // Checked rather than pushed: a pairing is human-paced, and a poll on this timescale costs nothing next to
+        // the machinery a notification per slot would need.
+        // Taken out of the lock before anything is awaited: a guard held across an await is a guard held for as long
+        // as the runtime likes.
+        let collected = lock(&shared.slots).collect(&code_hash, Instant::now());
+        if let Ok(answer) = collected {
+            let paired = v1::Paired { offer: Vec::new(), answer };
+            let _ = send(sink, &[Frame { body: Some(Body::Paired(paired)) }], max_frame).await;
+            return;
+        }
+        tokio::select! {
+            () = tokio::time::sleep(Duration::from_millis(250)) => {}
+            // the peer gave up, or said something it should not have
+            next = stream.next() => {
+                if !matches!(next, Some(Ok(Message::Ping(_) | Message::Pong(_)))) {
+                    lock(&shared.slots).forget(&code_hash);
+                    return;
+                }
+            }
+        }
+    }
+    lock(&shared.slots).forget(&code_hash);
+    let _ = send(sink, &[error_frame(Code::Limit, "the pairing expired")], max_frame).await;
+}
+
+/// What a peer is told about a slot it could not have. Deliberately the same shape for every refusal.
+fn slot_refusal(refusal: pairing::SlotError) -> &'static str {
+    match refusal {
+        pairing::SlotError::Full => "the hub is holding as many pairings as it will",
+        _ => "that pairing cannot be held",
     }
 }
 

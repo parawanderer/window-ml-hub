@@ -102,6 +102,13 @@ impl Slots {
         Ok(answer)
     }
 
+    /// Drop a slot: the peer that offered it has gone, so nothing is waiting for the answer any more.
+    pub fn forget(&mut self, code_hash: &[u8]) {
+        if let Ok(key) = Self::key(code_hash) {
+            self.open.remove(&key);
+        }
+    }
+
     /// How many slots are held, for the tests and the logs.
     pub fn held(&self) -> usize {
         self.open.len()

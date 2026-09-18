@@ -36,9 +36,9 @@ In order. Each step lands as its own PR with CI green. Design questions are answ
 
 Open, found along the way:
 
-- **Pairing is unbuilt, and everything left waits on it**: the connector's binary, the extension's connector, and the
-  chat page's pairing UI. Proposed in [design/pairing.md](design/pairing.md); it adds the hub's only unauthenticated
-  write, so the bounds in it want a second reading before code.
+- **Pairing's protocol is built** ([design/pairing.md](design/pairing.md)); what is left is the two UIs that drive
+  it, the chat page's and the connector's terminal prompt, and rotation-on-unpair, which belongs with the first of
+  those.
 
 - **A first message is still READ at up to 4 MiB before it is refused.** `max_hello_bytes` (64 KiB) now refuses one
   larger than a hello could be, but tokio-tungstenite 0.30 exposes only `get_config`, so the limit a connection reads

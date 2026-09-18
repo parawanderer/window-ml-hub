@@ -75,6 +75,8 @@ pub enum Event {
     Gap(v1::Gap),
     /// the hub reporting something about this connection; `THROTTLED` does not close it, the rest do
     Error(v1::Error),
+    /// an answer about a pairing: the offer waiting under a code, or the certificate that was left for it
+    Paired(v1::Paired),
 }
 
 #[derive(Debug)]
@@ -95,6 +97,52 @@ pub enum ClientError {
 
 /// The protocol major this client speaks.
 pub const PROTOCOL: u32 = 1;
+
+/// Offering a pairing: the socket a principal with no certificate opens, which does nothing else.
+///
+/// It never authenticates and never joins the relay. The hub holds the offer under the hash of a code the person
+/// carries, and hands back whatever was left for it — which is why the person compares a fingerprint on both
+/// screens: a hub cannot mint a certificate, but it could substitute the keys in the offer it is holding.
+pub struct Pairing {
+    ws: Ws,
+    max_frame: usize,
+}
+
+impl Pairing {
+    /// Offer these keys under `code_hash`, and wait for the answer. The hub holds the slot for ten minutes.
+    pub async fn offer(url: &str, code_hash: &[u8; 32], offer: Vec<u8>) -> Result<Self, ClientError> {
+        let max = 4 << 20;
+        let ws_config = WebSocketConfig::default().max_message_size(Some(max)).max_frame_size(Some(max));
+        let (mut ws, _) = tokio_tungstenite::connect_async_with_config(url, Some(ws_config), true)
+            .await
+            .map_err(|e| ClientError::Transport(e.to_string()))?;
+        // the hub's challenge comes first even here, and a pairing socket has nothing to answer it with
+        match first_frame(&mut ws, max).await? {
+            Body::Challenge(_) => {}
+            Body::Error(e) => return Err(ClientError::Refused(e)),
+            _ => return Err(ClientError::Protocol("the hub's first frame must be a challenge")),
+        }
+        let frame = Frame { body: Some(Body::PairOffer(v1::PairOffer { code_hash: code_hash.to_vec(), offer })) };
+        send(&mut ws, &[frame], max).await?;
+        match first_frame(&mut ws, max).await? {
+            Body::Paired(_) => Ok(Self { ws, max_frame: max }),
+            Body::Error(e) => Err(ClientError::Refused(e)),
+            _ => Err(ClientError::Protocol("the hub must answer an offer")),
+        }
+    }
+
+    /// Wait for the answer somebody left for this pairing: the sealed certificate, and the account root to expect.
+    pub async fn answer(&mut self) -> Result<Vec<u8>, ClientError> {
+        loop {
+            match first_frame(&mut self.ws, self.max_frame).await? {
+                Body::Paired(paired) if !paired.answer.is_empty() => return Ok(paired.answer),
+                Body::Paired(_) => {}
+                Body::Error(e) => return Err(ClientError::Refused(e)),
+                _ => return Err(ClientError::Protocol("the hub sent something else while pairing")),
+            }
+        }
+    }
+}
 
 /// A connected, authenticated client.
 ///
@@ -182,6 +230,28 @@ impl Client {
     /// The account this client belongs to.
     pub fn account(&self) -> [u8; 32] {
         self.account
+    }
+
+    /// Ask the hub for the offer waiting under a pairing code, so the person can be shown its fingerprint.
+    pub async fn pairing_offered(&mut self, code_hash: &[u8; 32]) -> Result<Vec<u8>, ClientError> {
+        let frame = Frame { body: Some(Body::PairFetch(v1::PairFetch { code_hash: code_hash.to_vec() })) };
+        self.send_frames(&[frame]).await?;
+        match self.next().await? {
+            Event::Paired(paired) => Ok(paired.offer),
+            Event::Error(e) => Err(ClientError::Refused(e)),
+            _ => Err(ClientError::Protocol("the hub answered a pairing fetch with something else")),
+        }
+    }
+
+    /// Leave the answer for a pairing: a certificate sealed to the keys the offer carried. Only the first is taken.
+    pub async fn pairing_answer(&mut self, code_hash: &[u8; 32], answer: Vec<u8>) -> Result<(), ClientError> {
+        let frame = Frame { body: Some(Body::PairAnswer(v1::PairAnswer { code_hash: code_hash.to_vec(), answer })) };
+        self.send_frames(&[frame]).await?;
+        match self.next().await? {
+            Event::Paired(_) => Ok(()),
+            Event::Error(e) => Err(ClientError::Refused(e)),
+            _ => Err(ClientError::Protocol("the hub answered a pairing answer with something else")),
+        }
     }
 
     /// Open a stream key granted to this principal, wherever it arrived (published on a key channel, or direct). The
@@ -299,7 +369,17 @@ impl Client {
                 }
                 // pongs answer our own pings; a hub-to-peer frame arriving again is the hub's business
                 Some(Body::Pong(_) | Body::Welcome(_) | Body::Challenge(_)) => {}
-                Some(Body::Hello(_) | Body::Subscribe(_) | Body::Unsubscribe(_)) | None => {
+                // a pairing answer, for a client that is in the middle of one; a caller that is not ignores it
+                Some(Body::Paired(paired)) => return Ok(Event::Paired(paired)),
+                Some(
+                    Body::Hello(_)
+                    | Body::Subscribe(_)
+                    | Body::Unsubscribe(_)
+                    | Body::PairOffer(_)
+                    | Body::PairFetch(_)
+                    | Body::PairAnswer(_),
+                )
+                | None => {
                     return Err(ClientError::Protocol("the hub sent a client-to-hub frame"));
                 }
             }

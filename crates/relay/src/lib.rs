@@ -298,6 +298,13 @@ impl Hub {
             Some(Body::Welcome(_) | Body::Backfilled(_) | Body::Gap(_) | Body::Presence(_) | Body::Challenge(_)) => {
                 fx.close.push((conn, error(Code::Invalid, 0, "a hub-to-peer frame sent to the hub")));
             }
+            // Pairing is the server's, not the relay's: it holds two blobs for principals that have no certificate
+            // yet, which is nothing this routes. The server answers these before a frame reaches here, so one that
+            // arrives is a peer sending it after its hello, or the server forgetting to intercept it. Both are worth
+            // saying out loud rather than ignoring.
+            Some(Body::PairOffer(_) | Body::PairFetch(_) | Body::PairAnswer(_) | Body::Paired(_)) => {
+                fx.close.push((conn, error(Code::Invalid, 0, "a pairing frame the relay does not route")));
+            }
             None => self.enqueue(&account, conn, error(Code::Unsupported, 0, "unknown frame"), &mut fx),
         }
         // what this frame made the relay queue, fanned out or backfilled, is work the account caused
@@ -316,6 +323,16 @@ impl Hub {
         } else {
             self.forget(conn, &mut fx);
         }
+        self.finish(fx)
+    }
+
+    /// Queue one frame for a connection, from the server rather than from another peer: an answer about a pairing,
+    /// or anything else the server decides on its own. It goes through the same queue and the same backpressure as a
+    /// delivery, because a connection that will not read is a connection that will not read.
+    pub fn deliver(&mut self, conn: ConnId, frame: Frame) -> Vec<Action> {
+        let Some(account) = self.conn_account.get(&conn).cloned() else { return Vec::new() };
+        let mut fx = Effects::default();
+        self.enqueue(&account, conn, frame, &mut fx);
         self.finish(fx)
     }
 
