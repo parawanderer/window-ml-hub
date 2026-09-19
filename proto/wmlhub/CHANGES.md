@@ -31,6 +31,14 @@ implement this; everybody else can ignore it.
   renewal is revoked when the certificate it renews is; and a list is refused when the list already held names its
   signer, which is how a lost revoker is shut out once the root has moved `may_revoke` elsewhere.
 - `vectors/seal-v1.json` is at version 4 with a `revocation` block, including a byte-for-byte signing check.
+- **A box connector honours lists.** It reads the revoker's `channel("revocations", revoker principal id)` (retained,
+  signed not sealed), rotates its key when a list names somebody new, and refuses NEW grants while its list is more
+  than 7 days old, once it has ever seen a revoker. A `box.grant` refused for either reason is answered with a sealed
+  result: `revoked`, or `stale <ms>`. A device that ignores results for `box.grant` sees no change; one that reads it
+  can say why box access paused.
+- `wmlhub_seal::Opened` carries the sender's whole verified `chain` (a Rust API change, no wire change): a revocation
+  can name the delegate that paired a device, or one certificate by the hash of its body, and the leaf alone cannot
+  answer either.
 
 ## v0.3.0 — `install` is never delegable
 

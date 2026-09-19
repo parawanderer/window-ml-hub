@@ -1,6 +1,12 @@
 # Proposal: revoking a device, once it already holds keys
 
-**Status: the two changes to `keys` are BUILT; the lists and the rotation are not.** The five questions below are
+**Status: A is BUILT for the box connector; B is not, and the runtime's signing lands with pairing (window-ml slice
+7).** The format and verifier are in `crates/keys` (#55), and a box connector now follows the account's list,
+rotates on it, and applies a 7-day freshness floor (`crates/connector/src/revoked.rs`). What remains: the runtime
+signing and publishing lists, which is the chat-page session's, and B, the hub refusing a revoked device's
+connection, which is optional.
+
+**Previously:** the two changes to `keys` were built and the lists and rotation were not. The five questions below are
 all answered: the four in Decided, and where the account root key lives, which decided that the runtime holds a
 never-delegable `may_revoke` rather than the root itself. `CertificateBody` now carries `may_revoke` and `renews`,
 and `verify_chain` enforces both rules (`crates/keys`, with a renewal in `vectors/seal-v1.json` so the TypeScript
@@ -95,10 +101,17 @@ Four rules, each a decision rather than a mechanism, and each with a test that n
 A list holds at most 256 entries (`MAX_REVOKED`) and is bounded in bytes before it is decoded. A list that would
 need more is a device inventory, not a revocation.
 
-**Still open: how a list reaches a publisher.** The format is settled and verifying one is built; the delivery is a
-proposal to the chat-page session, since the runtime is theirs, and it has one real trade-off: whatever carries a
-list, a hub that WITHHOLDS it delays a revocation, and a publisher that only talks through the hub cannot tell a
-withheld list from no list.
+**How a list reaches a publisher (decided 2026-09-19).** The revoker publishes its whole current list, signed and not
+sealed, on a retained channel, `channel("revocations", revoker principal id)`, whenever it changes and whenever it
+reconnects. A live publish is the push, and the ring's backfill on reconnect is the pull, so there is one mechanism
+rather than two to keep in step. A publisher learns who the revoker is from presence and remembers it, so it can read
+the ring while the revoker is offline.
+
+A hub that WITHHOLDS lists is answered by a freshness floor: a publisher refuses NEW grants while its list is more
+than 7 days old, and the revoker re-signs daily. Decided by Shane on the chat-page session's recommendation: without a
+floor the hub is trusted not to stay silent, and the design trusts it with nothing. The 7 is a constant on the
+publisher's side, not a field of the list, since a floor the signer chooses is a floor a compromised signer sets to a
+year.
 
 What a publisher does with one:
 

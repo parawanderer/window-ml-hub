@@ -39,15 +39,44 @@ pub enum RelayError {
 /// One box's traffic, sealed and published.
 pub struct Relay<'a> {
     publisher: Sender<'a>,
-    key: &'a StreamKey,
+    key: StreamKey,
     channels: Channels,
     edge_counter: u64,
     sample_counter: u64,
+    /// the first counter on each channel that the CURRENT key sealed: what a grant of it covers
+    key_from: KeyStart,
+}
+
+/// The counter on each channel a key starts at. A grant covers a key from there, so a device granted the key after a
+/// rotation reads on from the rotation and cannot open anything sealed under the key it was left out of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyStart {
+    pub edge: u64,
+    pub sample: u64,
 }
 
 impl<'a> Relay<'a> {
-    pub fn new(publisher: Sender<'a>, key: &'a StreamKey, channels: Channels) -> Self {
-        Self { publisher, key, channels, edge_counter: 0, sample_counter: 0 }
+    pub fn new(publisher: Sender<'a>, key: StreamKey, channels: Channels) -> Self {
+        Self { publisher, key, channels, edge_counter: 0, sample_counter: 0, key_from: KeyStart { edge: 1, sample: 1 } }
+    }
+
+    /// The key frames are sealed under now.
+    pub fn key(&self) -> &StreamKey {
+        &self.key
+    }
+
+    /// Where the current key starts on each channel.
+    pub fn key_from(&self) -> KeyStart {
+        self.key_from
+    }
+
+    /// Seal everything from the next frame on under `key`, which a revocation made necessary: anybody still holding
+    /// the old one reads nothing new, and the devices that remain notice a key id they do not hold and ask again,
+    /// which is the same thing a restarted connector makes them do. The counters carry on, so nothing already
+    /// published changes and no subscriber sees one go backwards.
+    pub fn rotate(&mut self, key: StreamKey) {
+        self.key = key;
+        self.key_from = KeyStart { edge: self.edge_counter + 1, sample: self.sample_counter + 1 };
     }
 
     /// Where this frame went, without publishing it: what the connector logs, and what the tests assert on.
@@ -85,6 +114,6 @@ impl<'a> Relay<'a> {
     }
 
     fn seal(&self, channel: &[u8], counter: u64, frame: &[u8]) -> Result<Vec<u8>, RelayError> {
-        seal_frame(&self.publisher, channel, self.key, counter, frame).map_err(RelayError::Seal)
+        seal_frame(&self.publisher, channel, &self.key, counter, frame).map_err(RelayError::Seal)
     }
 }

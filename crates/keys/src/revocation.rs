@@ -84,6 +84,19 @@ impl Revoked {
         })
     }
 
+    /// Does this list revoke anything `older` did not? A publisher rotates its key only then: re-signing the same
+    /// entries is how a revoker keeps a list fresh, and rotating on every re-sign would make every device ask for
+    /// the key again every day for nothing. A list that REMOVES entries adds nobody to exclude, so it is not a
+    /// reason to rotate either.
+    pub fn adds_to(&self, older: Option<&Revoked>) -> bool {
+        match older {
+            None => !self.is_empty(),
+            Some(older) => {
+                !self.principals.is_subset(&older.principals) || !self.certificates.is_subset(&older.certificates)
+            }
+        }
+    }
+
     /// How many entries it holds.
     pub fn len(&self) -> usize {
         self.principals.len() + self.certificates.len()

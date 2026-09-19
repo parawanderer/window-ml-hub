@@ -10,6 +10,7 @@ pub mod grant;
 pub mod http;
 pub mod pair;
 pub mod relay;
+pub mod revoked;
 pub mod run;
 pub mod serve;
 pub mod state;
