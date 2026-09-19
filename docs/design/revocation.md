@@ -58,26 +58,51 @@ property that holds by accident of an optimisation is one that disappears the fi
 
 ### A: a sealed revocation to each publisher
 
-A revocation is an ordinary sealed command from the runtime to a publisher, carrying a **revocation list** the
-publisher verifies for itself:
+A revocation list is what a publisher verifies for itself. **Built**, in `identity.proto` and
+`crates/keys/src/revocation.rs`, with a vector in `vectors/seal-v1.json`:
 
 ```
 RevocationList {
-  account_root       the key this list is signed under, so a list names the account it belongs to
-  version            monotonic; a publisher refuses a version it has already passed
-  issued_at_ms
-  repeated Revoked   { subject_key } or { certificate_hash }: the device entirely, or one certificate of it
-  signature          Ed25519 under "wmlhub/revocation/v1" over the body
+  body         an encoded RevocationBody, verified exactly as transmitted
+  signature    Ed25519 by the signer's leaf over "wmlhub/revocation/v1" || 0x00 || body
+  chain        the signer's chain to the root; its leaf carries may_revoke and must verify when the list is CHECKED
+}
+RevocationBody {
+  account       SHA-256 of the account root, so a list is never applied to another account
+  version       epoch ms at signing: refused at or below the one held, or more than a minute ahead of the holder's clock
+  principals    devices revoked entirely, by principal id
+  certificates  single certificates revoked, by SHA-256 of the body as transmitted
 }
 ```
 
-Revoking by the **SHA-256 of the transmitted certificate body** needs no schema field: the body is verified exactly
-as transmitted, so its hash is a stable identifier for one certificate. Revoking by **subject key** is "this device
-entirely, including whatever it is renewed into", which is what a person means by unpairing.
+The earlier sketch had the ROOT signing; the root-key decision below moved that to the one principal holding
+`may_revoke`, which is why a list carries its signer's chain.
+
+Four rules, each a decision rather than a mechanism, and each with a test that names it:
+
+- **A chain is revoked if ANY certificate in it is named.** A revoked delegate vouches for nothing, so the devices it
+  paired fall with it, and those are exactly the ones in doubt when the delegate is what was lost.
+- **Revoking a certificate revokes its renewals**, since a renewal re-grants exactly the revoked terms and would
+  otherwise let a renewer undo the revocation. Revoking by certificate is still not revoking the device: a fresh
+  certificate for it is untouched.
+- **A list is refused when the list already held names its signer.** This is how a lost revoker is shut out: the root
+  grants `may_revoke` to a second runtime, whose first list names the first, and from then on the first one's
+  signature counts for nothing although its certificate still verifies. Verification therefore takes the held list
+  as an input, and a holder that passes none has chosen not to know.
+- **A certificate that does not decode counts as revoked.** A publisher asking is deciding whether to hand over a key,
+  and "I could not tell" is not a yes.
+
+A list holds at most 256 entries (`MAX_REVOKED`) and is bounded in bytes before it is decoded. A list that would
+need more is a device inventory, not a revocation.
+
+**Still open: how a list reaches a publisher.** The format is settled and verifying one is built; the delivery is a
+proposal to the chat-page session, since the runtime is theirs, and it has one real trade-off: whatever carries a
+list, a hub that WITHHOLDS it delays a revocation, and a publisher that only talks through the hub cannot tell a
+withheld list from no list.
 
 What a publisher does with one:
 
-1. Verify the signature against the account root it already holds, and refuse a version at or below the one it has.
+1. Verify it against the account root it already holds and the list it already applies (`verify_revocations`).
 2. **Rotate the stream key.** A new key means a new key id, and the counter it is granted from is where the new key
    begins, so the devices that remain read on and nothing is re-encrypted.
 3. Refuse a future `box.grant` from anything the list names.

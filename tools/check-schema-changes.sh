@@ -16,10 +16,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 base="${1:-origin/main}"
 notes="proto/wmlhub/CHANGES.md"
-# The schemas, and the files that define what a second implementation has to reproduce about them.
-owned=(proto/wmlhub/ crates/keys/src/lib.rs crates/seal/src/lib.rs crates/seal/src/stream.rs)
+# The schemas, and the files that define what a second implementation has to reproduce about them. `crates/keys/src/`
+# is watched as a whole rather than file by file: a rule module added beside lib.rs (revocation.rs was the first) is
+# contract from the day it lands, and should not have to remember to register itself here. Tests are not contract.
+owned=(proto/wmlhub/ crates/keys/src/ crates/seal/src/lib.rs crates/seal/src/stream.rs)
 
-changed=$(git diff --name-only "$base...HEAD" -- "${owned[@]}" || true)
+changed=$(git diff --name-only "$base...HEAD" -- "${owned[@]}" | grep -v '/tests\.rs$\|/tests/' || true)
 [[ -z "$changed" ]] && { echo "ok      no contract this repository owns was changed"; exit 0; }
 
 if grep -qx "$notes" <<<"$changed"; then

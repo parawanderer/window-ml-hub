@@ -107,7 +107,7 @@ impl Identity {
         self.key.verifying_key().to_bytes()
     }
 
-    fn sign(&self, label: &[u8], message: &[u8]) -> Vec<u8> {
+    pub(crate) fn sign(&self, label: &[u8], message: &[u8]) -> Vec<u8> {
         let mut signed = Vec::with_capacity(label.len() + message.len());
         signed.extend_from_slice(label);
         signed.extend_from_slice(message);
@@ -411,7 +411,7 @@ pub fn verify_hello(leaf_key: &PublicKey, transcript: &[u8], signature: &[u8]) -
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BadSignature;
 
-fn verify(key: &PublicKey, label: &[u8], message: &[u8], signature: &[u8]) -> Result<(), BadSignature> {
+pub(crate) fn verify(key: &PublicKey, label: &[u8], message: &[u8], signature: &[u8]) -> Result<(), BadSignature> {
     let key = VerifyingKey::from_bytes(key).map_err(|_| BadSignature)?;
     let signature = Signature::from_slice(signature).map_err(|_| BadSignature)?;
     let mut signed = Vec::with_capacity(label.len() + message.len());
@@ -490,6 +490,7 @@ pub fn hex(bytes: &[u8]) -> String {
 }
 
 pub mod pairing;
+pub mod revocation;
 
 #[cfg(test)]
 mod tests;
