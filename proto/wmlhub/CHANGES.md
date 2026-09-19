@@ -17,10 +17,11 @@ Everything so far is additive: a peer that has never seen a field does not send 
 field ignores it. Nothing here has required a reader to change to keep working; two have required a reader to change
 to keep being CORRECT, and they are marked.
 
-## Unreleased — `RevocationList`
+## v0.4.0 — `RevocationList`, and a box connector that honours one
 
 **Additive; nothing a reader has today changes.** A runtime that signs lists, and a publisher that honours them,
-implement this; everybody else can ignore it.
+implement this; everybody else can ignore it. Pin this to sign lists: it is the first version where something
+honours them.
 
 - `RevocationList { body, signature, chain }` and `RevocationBody { account, version, principals, certificates }` in
   `identity.proto`, signed over `"wmlhub/revocation/v1" || 0x00 || body` by the leaf of `chain`, which must carry
