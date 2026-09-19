@@ -340,3 +340,46 @@ async fn two_accounts_cannot_reach_each_other() {
 fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
 }
+
+#[tokio::test]
+async fn a_stranger_who_fails_slows_the_next_and_one_who_authenticates_does_not() {
+    // A microsecond a second and nothing banked: a single refused hello is minutes of pacing, so whether a connection
+    // was charged is not a question of timing.
+    let dir = state_dir("strangers");
+    let registry = Registry::open(&dir, Registration::Open, OpenLimits::default()).unwrap();
+    let config = wmlhub::Config {
+        auth: wmlhub::Auth::Keys { hub_name: HUB.into(), registry: Arc::new(registry) },
+        strangers: wmlhub::strangers::Budget { us_per_second: 1, burst_us: 0 },
+        ..wmlhub::Config::default()
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    tokio::spawn(wmlhub::serve(listener, config, 1));
+    let root = Identity::from_seed([1; 32]);
+    let (a, b, c) = (device(&root, 2, Role::Client), device(&root, 3, Role::Client), device(&root, 4, Role::Client));
+    // Every login is bounded: a regression here PACES a connection, and a paced connection without a deadline is a
+    // test that hangs instead of failing.
+    let deadline = Duration::from_secs(2);
+
+    // Logins that verify are their accounts' cost, so back to back they pace nothing. A hub restart brings every
+    // device back at once, and this is why that is never slowed down.
+    let (_a, answer, _) =
+        tokio::time::timeout(deadline, login(&url, &root, &a, b"", Tamper::default())).await.expect("the first login");
+    assert!(welcomed(&answer));
+    let (_b, answer, _) = tokio::time::timeout(deadline, login(&url, &root, &b, b"", Tamper::default()))
+        .await
+        .expect("an authenticated connection was charged to the strangers, and paced the next one");
+    assert!(welcomed(&answer));
+
+    let bad = Tamper { use_nonce: Some(vec![0; 32]), ..Tamper::default() };
+    let (_c, answer, _) =
+        tokio::time::timeout(deadline, login(&url, &root, &c, b"", bad)).await.expect("the refused login");
+    assert!(did_not_verify(&answer));
+
+    // The refused connection is charged when its task gives its place back, just after the refusal is sent; this
+    // wait is for that ordering on the hub, not the thing under test.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    // The kernel still completes the TCP handshake into its backlog. The websocket one is not answered.
+    let next = tokio::time::timeout(Duration::from_millis(500), tokio_tungstenite::connect_async(&url)).await;
+    assert!(next.is_err(), "a refused hello did not pace the next stranger");
+}

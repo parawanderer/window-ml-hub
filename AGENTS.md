@@ -30,7 +30,12 @@ Read before changing the relay: [`RUNTIME_HUB.md`](https://github.com/parawander
 - **A bound that keys on the source address cannot be a default here.** The hub is meant to run behind Tailscale or
   Caddy, where every client arrives from the proxy's address, so one bucket would be shared by a household. The
   connection rate exists and is off; what bounds the pre-authentication surface without an address is
-  `max_pending_sockets`.
+  `max_pending_sockets` (how many strangers at once: memory) and `strangers.rs` (how fast they come and go: time).
+- **Strangers are a tenant too.** Work for a connection that never authenticates is charged to one shared budget
+  when it gives its place back (`Stranger`'s `Drop`, so no exit path is missed), and the accept loop waits out the
+  debt. A new way for a connection to end before authenticating needs nothing; a new way for one to become somebody
+  ELSE's cost (as pairing does) must call `settle()`, or strangers are charged for work that is not theirs. The debt is read AFTER `accept`, since
+  the loop parks there and a check before it misses failures that land while it waits.
 - **Anything the hub CHOOSES fits in a double** (`MAX_EXACT_IN_A_DOUBLE`). The browser's connector holds a `seq` or
   an `epoch` in a double, and a full 64-bit epoch cannot round-trip: the TypeScript decoder threw on the first
   real connection. The wire types stay 64-bit.
@@ -101,6 +106,12 @@ found by the feature it breaks, weeks later. Say what changed and whether a read
 `wmlhub-loadgen` (`crates/loadgen`) starts a release hub as a child process and drives it: `fanout` for throughput,
 latency percentiles and CPU per delivery, `idle` for memory per connection. How to read its three latency figures,
 and every result so far: [`docs/perf/README.md`](docs/perf/README.md).
+
+It runs the hub in development mode, which verifies NOTHING, so anything about the handshake needs `--keys`, where
+every connection presents a real chain. `--hello-flood N --flood-kind verify|cheap` adds connections that fail their
+hello for the whole run. Before trusting a flood's numbers: check `netstat -an -p tcp | grep -c TIME_WAIT` is low
+between runs, and check the NO-flood runs' `send lag`. A busy laptop shows up there first, as the load generator's
+own delay, and a batch where it is tens of milliseconds says nothing about the hub.
 
 ## Traps
 

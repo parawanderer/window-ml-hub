@@ -8,6 +8,7 @@ pub mod arrivals;
 pub mod forwarded;
 pub mod pairing;
 pub mod registry;
+pub mod strangers;
 
 use std::collections::HashMap;
 use std::hash::{BuildHasher, RandomState};
@@ -83,6 +84,9 @@ pub struct Config {
     pub max_pairing_sockets: usize,
     /// Independent relay shards, each with its own lock; an account lives in exactly one. 0 picks four per core.
     pub shards: usize,
+    /// How much hub CPU connections that never authenticate may cost (`strangers`). `max_pending_sockets` bounds how
+    /// many strangers there are at once; this bounds how fast they may come and go, which is what costs time.
+    pub strangers: strangers::Budget,
 }
 
 impl Default for Config {
@@ -101,6 +105,7 @@ impl Default for Config {
             trusted_proxies: forwarded::Proxies::default(),
             max_pairing_sockets: 64,
             shards: 0,
+            strangers: strangers::DEFAULT_BUDGET,
         }
     }
 }
@@ -138,6 +143,50 @@ struct Shared {
     arrivals: Mutex<arrivals::Gate>,
     /// the two blobs of each pairing in flight, which the hub holds and does not read
     slots: Mutex<pairing::Slots>,
+    /// what connections that never authenticated have cost, which the accept loop waits out
+    strangers: Mutex<strangers::Strangers>,
+}
+
+/// A socket's place among the unauthenticated, and the bill if it leaves without authenticating.
+///
+/// Charging on DROP rather than at each refusal is the point: every way a connection can end before its hello
+/// verifies — a refusal, a timeout, a malformed first frame, a websocket handshake that never finishes, and whatever
+/// path is added next — gives its place back through here, so none of them can be missed. Only authenticating or
+/// becoming a pairing socket settles the bill, because only those have somebody else to charge.
+///
+/// A connection that verifies and is then refused because its ACCOUNT is over budget is charged here too. `connect`
+/// spends nothing on a refusal, so this is the only place that verification is paid for at all, and it gives an
+/// account no hold over the accept loop that somebody without one does not already have by failing a hello.
+struct Stranger {
+    _place: tokio::sync::OwnedSemaphorePermit,
+    shared: Arc<Shared>,
+    cost_us: u64,
+}
+
+impl Stranger {
+    fn new(place: tokio::sync::OwnedSemaphorePermit, shared: Arc<Shared>) -> Self {
+        Self { _place: place, shared, cost_us: strangers::NO_HELLO_US }
+    }
+
+    /// It sent a hello, so a refusal now means verification ran (`strangers::REFUSED_HELLO_US`).
+    fn sent_hello(&mut self) {
+        self.cost_us = strangers::REFUSED_HELLO_US;
+    }
+
+    /// It authenticated, or became a pairing socket: its cost is somebody's, so none of it is the strangers'. A
+    /// pairing socket keeps its place (it is still unauthenticated and still counts against `max_pending_sockets`)
+    /// and is bounded by `max_pairing_sockets` instead.
+    fn settle(&mut self) {
+        self.cost_us = 0;
+    }
+}
+
+impl Drop for Stranger {
+    fn drop(&mut self) {
+        if self.cost_us > 0 {
+            lock(&self.shared.strangers).charge(self.cost_us, Instant::now());
+        }
+    }
 }
 
 /// A poisoned lock means a panic mid-update; the relay's state is then not trustworthy, so fail loudly.
@@ -279,11 +328,23 @@ pub async fn serve(listener: TcpListener, config: Config, epoch_seed: u64) -> io
         shard_hasher: RandomState::new(),
         arrivals: Mutex::new(arrivals::Gate::new(config.arrivals)),
         slots: Mutex::new(pairing::Slots::default()),
+        strangers: Mutex::new(strangers::Strangers::new(config.strangers, Instant::now())),
         config,
         started: Instant::now(),
     });
     loop {
         let (tcp, peer) = listener.accept().await?;
+        // Strangers over their budget are served more slowly: nothing is done for this socket, and nothing further is
+        // accepted, until the debt is paid. What waits, waits in the kernel's backlog, which costs this process
+        // nothing, while connected accounts are read and written by other tasks the whole time.
+        //
+        // Checked AFTER accept rather than before it, because the loop spends its idle time parked in `accept`: a
+        // check before it would be read before the failures that land while it is parked, and the connection that
+        // woke it would go through unpaced.
+        let owed = lock(&shared.strangers).wait(Instant::now());
+        if let Some(wait) = owed {
+            tokio::time::sleep(wait).await;
+        }
         let Ok(permit) = sockets.clone().try_acquire_owned() else {
             tracing::warn!(%peer, "socket limit reached; refusing");
             continue;
@@ -302,7 +363,8 @@ pub async fn serve(listener: TcpListener, config: Config, epoch_seed: u64) -> io
         let shared = shared.clone();
         let pairing = pairing_sockets.clone();
         tokio::spawn(async move {
-            connection(shared, tcp, peer.ip(), proxied, pending_permit, pairing).await;
+            let stranger = Stranger::new(pending_permit, shared.clone());
+            connection(shared, tcp, peer.ip(), proxied, stranger, pairing).await;
             drop(permit);
         });
     }
@@ -313,7 +375,7 @@ async fn connection(
     tcp: TcpStream,
     peer: IpAddr,
     proxied: bool,
-    pending: tokio::sync::OwnedSemaphorePermit,
+    mut pending: Stranger,
     pairing_sockets: Arc<Semaphore>,
 ) {
     // Frames are small and latency-sensitive; Nagle would hold one back waiting for an ACK.
@@ -388,6 +450,7 @@ async fn connection(
                 let _ = send(&mut sink, &[error_frame(Code::Limit, "too many pairings at once")], max_frame).await;
                 return;
             };
+            pending.settle();
             pairing_socket(&shared, &mut sink, &mut stream, offer, max_frame).await;
             return;
         }
@@ -396,6 +459,9 @@ async fn connection(
             return;
         }
     };
+    if matches!(shared.config.auth, Auth::Keys { .. }) {
+        pending.sent_hello();
+    }
     let account = match authenticate(&shared.config.auth, &hello, &nonce, address) {
         Ok(a) => a,
         Err(frame) => {
@@ -412,7 +478,9 @@ async fn connection(
             return;
         }
     };
-    // Authenticated: this socket is no longer part of the surface a stranger can occupy, so its place goes back.
+    // Authenticated: this socket is no longer part of the surface a stranger can occupy, so its place goes back and
+    // its handshake is its account's cost, already charged by `connect`.
+    pending.settle();
     drop(pending);
     tracing::info!(conn = id, shard, role = ?hello.role(), "connected");
 
