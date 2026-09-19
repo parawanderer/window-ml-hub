@@ -10,11 +10,20 @@ cargo build --release -p wmlhub -p wmlhub-loadgen
 ./target/release/wmlhub-loadgen fanout --accounts 10 --subscribers 5 --channels 4 --rate 2000 --seconds 8
 ./target/release/wmlhub-loadgen idle --connections 10000
 ./target/release/wmlhub-loadgen --hub-bin target-before/release/wmlhub ...   # A/B against another build
+./target/release/wmlhub-loadgen --keys fanout --seconds 10 --hello-flood 64 --flood-kind verify
 ```
 
-- **It starts the hub as a child process** in development mode on loopback, so the hub's CPU time and resident memory
-  (sampled with `ps`) are its own. Development mode skips signature verification: the handshake is not what `fanout`
-  measures.
+- **It starts the hub as a child process** on loopback, so the hub's CPU time and resident memory (sampled with `ps`)
+  are its own. By default in development mode, which skips signature verification: the handshake is not what
+  `fanout` measures. **`--keys`** runs it as deployed instead, every connection presenting a real certificate chain,
+  with open registration so each benchmark account registers itself.
+- **`--hello-flood N`** (needs `--keys`): N connections that each open, send a hello that FAILS, and reconnect, for
+  the whole measured window, on a runtime of their own so they cannot delay the measuring tasks. `--flood-kind verify`
+  sends a chain that verifies all the way to the hello signature and fails there, three Ed25519 verifications, the
+  most a failure can cost; `cheap` fails before any signature, which isolates what the connection itself costs. Both
+  close with a reset: a graceful close leaves each connection in TIME_WAIT for half a minute, and at tens of thousands
+  a second one machine runs out of ephemeral ports within a second, after which the flood measures the port table and
+  the leftovers corrupt the next run. Check `netstat -an -p tcp | grep -c TIME_WAIT` is low before each run.
 - **`fanout`**: per account, one runtime publishes session events at a fixed rate across several channels, and
   several clients subscribe to all of them. `--rate` is per runtime.
 - **Latency is reported three ways**, because each hides something the others show:
@@ -226,6 +235,71 @@ the 10k-idle scenario is the one to check it against. Unchanged after it landed:
 A handshake holds its place for as long as it takes to verify a chain (about 100 us in keys mode), so 256 at once is
 a few thousand logins a second: a hub restart with ten thousand clients reconnecting is bounded by that rather than
 blocked by it.
+
+### Strangers: a flood of hellos that fail, 2026-09-19
+
+Every bound here is per account, and a connection that authenticates pays for its own handshake. One that never
+authenticates had no account to charge, so its work was charged to nobody, and it runs on the same threads as every
+connected account's traffic. `max_pending_sockets` bounds how many strangers there are at once, which is memory; it
+said nothing about how fast they come and go, which is time. `strangers.rs` makes them one tenant with a CPU budget:
+each connection that gives its place back without authenticating is charged what it measured, and past the budget
+the accept loop takes new connections more slowly.
+
+`--keys fanout --seconds 10` (10 accounts x 5 subscribers x 4 channels at 200 msg/s per runtime) with and without
+`--hello-flood 64`, three runs each. The latency is the CONNECTED accounts', which is the whole question:
+
+| flood | build | failed hellos/s | connected p99 | transit p99 | hub CPU |
+| --- | --- | --- | --- | --- | --- |
+| none | before | 0 | 2.8, 7.3, 3.3 ms | 0.9-3.9 ms | 10-11% |
+| | after | 0 | 3.9, 7.7, 2.2 ms | 0.4-3.6 ms | 10-11% |
+| `cheap`: fails before any signature | before | 27-37k | 62-66 ms | 61-65 ms | 135-181% |
+| | after | 1,441 | **3.3-3.4 ms** | 1.5 ms | 17-18% |
+| `verify`: fails at the hello signature | before | 20-24k | 34, 80, 40 ms | 33-79 ms | 385-410% |
+| | after | 1,440-1,442 | **4.0, 7.7, 3.5 ms** | 1.4-4.1 ms | 32-33% |
+
+What it showed:
+
+- **The damage follows churn, not CPU.** The `cheap` flood does as much harm as `verify` on less than half the CPU,
+  because it comes and goes faster. So the thing to bound is how fast strangers arrive, which a budget charged per
+  failure does.
+- **Only failures are charged**, so a hub nobody is attacking is unchanged, and a restart that brings every device
+  back at once is never paced: each of those connections authenticates and is its account's cost. A flood does pace
+  everybody not yet connected, which nothing that cannot tell an attacker from a stranger can avoid.
+- **Both kinds are held to the same ~1,441 a second, and that is the budget.** Any connection that sends a hello and
+  is refused is charged the verified cost (`REFUSED_HELLO_US`, 190 us), whichever check refused it, so both floods
+  cost the same: (250 ms/s x 10 s + 250 ms banked) / 190 us = 1,447 a second. Charging a malformed hello exactly would
+  need the verifier to report how far it got, and over-charging one only makes strangers slower.
+- **A bigger budget lets harm back in.** At `--unauthenticated-cpu-percent 100` the `verify` flood ran at 5,760 a
+  second against a predicted 5,789, and connected p99 was 11 and 24 ms. The setting trades how fast newcomers are
+  accepted against connected accounts' latency, and a quarter of a core is where the table above puts it.
+- **The charge is an estimate, and it varies.** A refused hello's realised cost was about 183 us at the default,
+  which is what the 190 us charge is set against, about 242 us at a whole core (the hub used 1.27 cores against a
+  budget of one), and about 176 us unpaced at 20k a second. It is not simply rising with the rate, so no cause is
+  claimed here. At the default it lands on target: 33% total against 11% without the flood.
+- **Two explanations were measured and dropped.** That both kinds ran at 1,441 a second looked like the timer: a
+  tokio sleep lasts at least a millisecond, so sleeping off every microsecond of debt would pace by the tick. A carry
+  for debt under a millisecond made no difference, and neither did removing it at a full core (5,760 a second with,
+  5,763 without): under a concurrent flood the debt arrives several failures deep, so every wait is already longer
+  than a tick. The carry was taken out rather than kept on an argument the numbers did not support.
+- **The debt is read after `accept`, not before.** The loop spends its idle time parked in `accept`, so a check before
+  it is read before the failures that land while it waits, and the connection that wakes it goes through unpaced.
+  `a_stranger_who_fails_slows_the_next_and_one_who_authenticates_does_not` fails when the check is moved.
+
+The "after" rows are the build this landed as. A later confirmation run on it was discarded rather than averaged in:
+the machine was saturated (load average 10 on 10 cores, macOS storage indexing at 220%), and the runs with NO flood
+showed the load generator's own send lag at 7-45 ms p99 against 2-4 ms in every other batch, which is noise larger
+than anything being measured.
+
+The load generator needed three fixes before any of this meant anything, each of which produced plausible numbers
+first:
+
+- The flood tasks shared the measuring tasks' runtime and signed a hello per connection, so the flood's cost showed
+  up as HUB latency. They run on a runtime of their own now, and the hello is built once: it signs the wrong nonce,
+  which is wrong whatever the hub sends.
+- Each flood connection closed gracefully and left a socket in TIME_WAIT. At 26k a second one machine runs out of
+  ephemeral ports within a second, and the leftovers corrupted the NEXT run: one delivered 20% of its messages with
+  the flood refused 5 times a second. They close with a reset now, as a flood would.
+- The runs without a flood recorded nothing: an empty argument array under `set -u` is an error in macOS's bash 3.2.
 
 ## Next (from the profile)
 

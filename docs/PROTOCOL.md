@@ -118,6 +118,14 @@ contract's `epoch`/`cursor`, inside the ciphertext, are the runtime's own and su
   a second deep (`CONNECT_REFUSED_ABOVE_MS`) is refused with `Error{LIMIT}` saying how long to wait, rather than
   admitted and charged. Ordinary traffic makes a debt of milliseconds, so a phone can still log in while a runtime
   is publishing hard; a client that only connects and disconnects cannot.
+- **A connection that never authenticates is charged to strangers.** It has no account, so strangers are one tenant
+  with one budget, a share of one core (`--unauthenticated-cpu-percent`, 25 by default). Each connection that ends
+  without authenticating is charged what such a connection was measured to cost: about 50 us if it never sent a hello,
+  and about 190 us if it sent one and was refused, whichever check refused it. Past the budget the hub accepts new
+  connections more slowly until it is paid off; what waits, waits in the kernel's backlog. Connected accounts are
+  never slowed by it, and a connection that authenticates is never charged to it, so a hub restart bringing every
+  device back at once is not paced. A flood of failing hellos does pace everyone who is not yet connected, which
+  nothing that cannot tell an attacker from a stranger can avoid.
 - **Every number the hub chooses fits in a double** (2^53 - 1): `seq`, `epoch`, and the times in `Welcome`. The wire
   types are 64-bit, but a client whose only number is a double — the browser's connector — must be able to hold one
   exactly, and an epoch that rounded would make two rings look like one. A peer's own `ref` is echoed back to that

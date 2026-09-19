@@ -14,6 +14,7 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 hdrhistogram = { version = "7", default-features = false }
 tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "sync", "time", "process"] }
 tokio-tungstenite = "0.30"
+wmlhub-keys = { path = "../keys" }
 wmlhub-proto = { path = "../proto" }
 
 [lints]

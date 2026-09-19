@@ -54,9 +54,12 @@ Open, found along the way:
   either a way to change a live connection's config upstream, or our own handshake before the websocket one.
 - ~~**An address-keyed connection rate cannot be the default while every client arrives from a proxy.**~~ The hub
   reads a forwarded address from proxies the operator names (`WMLHUB_TRUSTED_PROXIES`), and naming them turns the
-  rate on. Still open underneath it: a hello that fails verification costs a certificate verification charged to
-  nobody, since there is no account until it verifies. What bounds that is `max_pending_sockets` and, now, the
-  per-client connection rate wherever an operator has said where clients come from.
+  rate on. ~~Still open underneath it: a hello that fails verification costs a certificate verification charged to
+  nobody.~~ Connections that never authenticate are one tenant with a CPU budget now (`strangers.rs`, a quarter of a
+  core by default): each one that gives its place back without authenticating is charged what it measured, and past
+  the budget the accept loop takes new connections more slowly. Measured in docs/perf/README.md §Strangers: a flood
+  of failing hellos took connected accounts' p99 from about 3 ms to 35-80 ms, and with the budget it stays inside
+  the no-flood spread.
 
 - ~~**No limit on how fast an account publishes.**~~ Each account has a work budget now (docs/PROTOCOL.md §Limits and
   failure). ~~Still unmetered: connecting and disconnecting.~~ An account's handshakes are charged to that same

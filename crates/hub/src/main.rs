@@ -92,6 +92,12 @@ struct Serve {
     /// Independent relay shards, each with its own lock. 0 picks four per core.
     #[arg(long, env = "WMLHUB_SHARDS", default_value_t = 0)]
     shards: usize,
+    /// How much of one core connections that never authenticate may cost, as a percentage. Past it, new connections
+    /// are accepted more slowly until it is paid off; connected accounts are never slowed by it, and a connection that
+    /// authenticates is never charged to it, so a hub restart bringing every device back at once is not paced. 0 turns
+    /// it off.
+    #[arg(long, env = "WMLHUB_UNAUTHENTICATED_CPU_PERCENT", default_value_t = 25)]
+    unauthenticated_cpu_percent: u32,
     /// Development mode: no authentication, trusts whatever a client claims. Loopback addresses only.
     #[arg(long, env = "WMLHUB_DEV")]
     dev: bool,
@@ -215,6 +221,9 @@ async fn serve(args: Serve) -> ExitCode {
     config.max_pending_sockets = args.max_pending_sockets;
     config.max_pairing_sockets = args.max_pairing_sockets;
     config.max_hello_bytes = args.max_hello_bytes;
+    // a percentage of one core is ten thousand microseconds a second, and a second of it may be spent at once
+    let us_per_second = u64::from(args.unauthenticated_cpu_percent) * 10_000;
+    config.strangers = wmlhub::strangers::Budget { us_per_second, burst_us: us_per_second };
     let proxies = match wmlhub::forwarded::Proxies::parse(&args.trusted_proxies) {
         Ok(proxies) => proxies,
         Err(e) => return fail(&format!("--trusted-proxies: {e}")),
