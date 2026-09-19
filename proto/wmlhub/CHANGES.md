@@ -7,7 +7,7 @@ From a reader's side a change is invisible until something needs it, so this fil
 **It is not only the schema.** A second implementation reproduces the chain rules, the domain-separation labels, the
 bounds and the channel derivation, and none of those lives in a `.proto`: `NEVER_DELEGABLE` is a Rust constant, and
 adding a name to it means the hub refuses a chain a reader still accepts, which is a divergence with no failing
-test on either side. So `crates/keys/src/lib.rs` and `crates/seal/src/{lib,stream}.rs` are watched here too.
+test on either side. So `crates/keys/src/` and `crates/seal/src/{lib,stream}.rs` are watched here too.
 
 **If you vendor these files**: pin them with a `<name>.proto.pin.json` carrying the git blob id, and run
 `tools/check-pins.sh --upstream` (20 lines of bash in this repo, copyable) on a schedule. That tells you upstream has
@@ -16,6 +16,21 @@ moved without depending on anybody remembering to say so. This file tells you wh
 Everything so far is additive: a peer that has never seen a field does not send it, and one that does not know a
 field ignores it. Nothing here has required a reader to change to keep working; two have required a reader to change
 to keep being CORRECT, and they are marked.
+
+## Unreleased — `RevocationList`
+
+**Additive; nothing a reader has today changes.** A runtime that signs lists, and a publisher that honours them,
+implement this; everybody else can ignore it.
+
+- `RevocationList { body, signature, chain }` and `RevocationBody { account, version, principals, certificates }` in
+  `identity.proto`, signed over `"wmlhub/revocation/v1" || 0x00 || body` by the leaf of `chain`, which must carry
+  `may_revoke` and verify at the time the list is CHECKED.
+- `version` is epoch milliseconds, refused at or below the one held and more than a minute ahead of the holder's
+  clock. A timestamp, because the signer is replaceable and a new one cannot learn a counter.
+- A chain is revoked if ANY certificate in it is named, so a revoked delegate takes the devices it paired with it; a
+  renewal is revoked when the certificate it renews is; and a list is refused when the list already held names its
+  signer, which is how a lost revoker is shut out once the root has moved `may_revoke` elsewhere.
+- `vectors/seal-v1.json` is at version 4 with a `revocation` block, including a byte-for-byte signing check.
 
 ## v0.3.0 — `install` is never delegable
 

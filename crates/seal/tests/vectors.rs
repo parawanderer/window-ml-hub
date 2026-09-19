@@ -11,11 +11,12 @@
 use std::path::PathBuf;
 
 use serde_json::{Value, json};
+use wmlhub_keys::revocation::{certificate_hash, sign_revocations, verify_revocations};
 use wmlhub_keys::{
     CertSpec, Identity, hello_transcript, hex, issue, principal_id, renew, scope, verify_chain, verify_hello,
 };
 use wmlhub_proto::prost::Message;
-use wmlhub_proto::v1::{Certificate, Role};
+use wmlhub_proto::v1::{Certificate, RevocationList, Role};
 use wmlhub_seal::{
     AgreementKey, ChannelKey, Receiver, Recipient, Sender, StreamKey, StreamReader, open_grant, seal_command,
     seal_frame, seal_result, wrap_key,
@@ -28,7 +29,7 @@ fn issue_ok(issuer: &Identity, spec: &CertSpec) -> Certificate {
     issue(issuer, spec).expect("a certificate this issuer may make")
 }
 
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 const HUB: &str = "hub.test";
 const TIME_MS: u64 = 1_800_000_000_000;
 /// Fixed, so the vectors are the same story every time they are regenerated.
@@ -41,6 +42,8 @@ const CHANNEL_KEY: [u8; 32] = [66; 32];
 /// The renewal cast: a laptop that may pair, and a phone the ROOT gave `approve` and the laptop keeps alive.
 const LAPTOP_SEED: u8 = 77;
 const APPROVER_SEED: u8 = 88;
+/// The revocation cast: the one principal the root allowed to sign lists.
+const REVOKER_SEED: u8 = 99;
 
 fn path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../vectors/seal-v1.json")
@@ -158,6 +161,29 @@ fn renewal(root: &Identity) -> (Certificate, Certificate, Certificate) {
     (laptop_cert, before, renewed)
 }
 
+/// A revocation list, as the vectors describe it: the revoker's certificate, and a list it signed revoking the phone
+/// entirely and one certificate of the approver. Ed25519 is deterministic, so a second implementation signing the
+/// same body with the same key must produce these exact bytes.
+fn revocation(root: &Identity, phone: &Who, before: &Certificate) -> RevocationList {
+    let revoker = Identity::from_seed([REVOKER_SEED; 32]);
+    let chain = vec![issue_ok(
+        root,
+        &CertSpec {
+            subject: revoker.public(),
+            agreement_key: AgreementKey::from_seed(&[REVOKER_SEED.wrapping_add(1); 32]).public(),
+            role: Role::Runtime,
+            scopes: vec![],
+            may_pair: false,
+            may_revoke: true,
+            not_before_ms: TIME_MS - 86_400_000,
+            not_after_ms: TIME_MS + 86_400_000,
+            label: "the runtime that may revoke".into(),
+        },
+    )];
+    let account = wmlhub_keys::account_id(&root.public());
+    sign_revocations(&revoker, &chain, account, TIME_MS, &[phone.id()], &[certificate_hash(before)])
+}
+
 #[test]
 fn the_vectors_open_with_this_implementation() {
     let raw = std::fs::read_to_string(path()).expect("vectors/seal-v1.json is checked in");
@@ -169,6 +195,17 @@ fn the_vectors_open_with_this_implementation() {
     assert_eq!(v["account"]["root_public"], hex(&root.public()));
     assert_eq!(v["principals"]["runtime"]["principal_id"], hex(&runtime.id()));
     assert_eq!(v["principals"]["phone"]["certificate"], hex(&phone.chain[0].encode_to_vec()));
+
+    // The revocation list, read back from the file, and rebuilt: signing is deterministic, so the bytes must match.
+    let (_, before, _) = renewal(&root);
+    let list =
+        RevocationList::decode(unhex(v["revocation"]["list"].as_str().expect("hex")).as_slice()).expect("a list");
+    assert_eq!(list.encode_to_vec(), revocation(&root, &phone, &before).encode_to_vec(), "signing is deterministic");
+    let at = v["revocation"]["verify_at_ms"].as_u64().expect("a time");
+    let revoked = verify_revocations(&root.public(), &list, at, None).expect("the list verifies");
+    assert!(revoked.revokes(&phone.chain), "it names the phone");
+    assert!(revoked.revokes(std::slice::from_ref(&before)), "and the approver's old certificate");
+    assert!(!revoked.revokes(&runtime.chain), "and nothing else");
 
     // The renewal, read back from the file rather than rebuilt, so the checked-in bytes are what verifies.
     let cert = |key: &str| {
@@ -289,6 +326,16 @@ fn write_vectors() {
         "principals": {
             "runtime": runtime.described(RUNTIME_SEED),
             "phone": phone.described(PHONE_SEED),
+        },
+        "revocation": {
+            "what": "A revocation list. Verify it under the account root at verify_at_ms with no list held: it names \
+    the phone entirely and the approver's expired certificate by hash. Signing the same body with the revoker's key must \
+    reproduce `list` byte for byte, since Ed25519 is deterministic.",
+            "revoker_seed": hex(&[REVOKER_SEED; 32]),
+            "list": hex(&revocation(&root, &phone, &before).encode_to_vec()),
+            "verify_at_ms": TIME_MS,
+            "principals": [hex(&phone.id())],
+            "certificates": [hex(&certificate_hash(&before))],
         },
         "renewal": {
             "what": "A delegate re-issuing a scope it could never have granted. Verify [renewed, delegate] under the account root at verify_at_ms: it holds `approve`, which only the root may grant, and the predecessor is expired.",

@@ -79,3 +79,10 @@ path = "fuzz_targets/http.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "revocation"
+path = "fuzz_targets/revocation.rs"
+test = false
+doc = false
+bench = false
