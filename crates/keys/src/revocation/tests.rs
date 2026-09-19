@@ -232,3 +232,23 @@ fn a_certificate_that_does_not_decode_counts_as_revoked() {
     assert!(revoked.is_empty());
     assert!(revoked.revokes(&[Certificate { body: vec![0xff; 16], signature: vec![] }]));
 }
+
+#[test]
+fn a_list_adds_to_another_only_when_it_names_someone_new() {
+    // Rotating a stream key makes every device ask again, so a publisher rotates only when there is somebody new to
+    // leave out. Re-signing the same entries, which is how a list is kept fresh, is not that.
+    let a = account();
+    let (phone, tablet) = (principal(&a.phone), principal(&a.tablet));
+    let first = a.verify(&a.list(NOW - 3, &[phone], &[]), None).unwrap();
+    assert!(first.adds_to(None), "the first list with anything in it");
+    assert!(!a.verify(&a.list(NOW - 3, &[], &[]), None).unwrap().adds_to(None), "an empty first list excludes nobody");
+
+    let resigned = a.verify(&a.list(NOW - 2, &[phone], &[]), Some(&first)).unwrap();
+    assert!(!resigned.adds_to(Some(&first)), "the same entries, re-signed to stay fresh");
+    let more = a.verify(&a.list(NOW - 1, &[phone, tablet], &[]), Some(&resigned)).unwrap();
+    assert!(more.adds_to(Some(&resigned)), "a device added");
+    let fewer = a.verify(&a.list(NOW, &[tablet], &[]), Some(&more)).unwrap();
+    assert!(!fewer.adds_to(Some(&more)), "a device let back in adds nobody to exclude");
+    let by_cert = a.verify(&a.list(NOW + 1, &[tablet], &[certificate_hash(&a.phone[0])]), Some(&fewer)).unwrap();
+    assert!(by_cert.adds_to(Some(&fewer)), "a certificate added counts too");
+}

@@ -241,6 +241,10 @@ pub struct Opened {
     pub answers: Option<[u8; NONCE_BYTES]>,
     /// the sender's leaf certificate, for anything further the recipient decides by (its role, its label)
     pub leaf: CertificateBody,
+    /// The sender's whole chain as it arrived, leaf first, already verified. The leaf body alone is enough to know who
+    /// asked, and not enough to know whether a revocation list names them: a list can name the delegate that paired
+    /// them, or one certificate by the hash of its body as transmitted, and both need the certificates themselves.
+    pub chain: Vec<Certificate>,
 }
 
 /// A principal receiving commands: its keys, the account it belongs to, and the nonces it has accepted.
@@ -351,6 +355,7 @@ impl Receiver {
             body: body.body,
             answers,
             leaf: verified.leaf,
+            chain: signed.chain,
         })
     }
 }

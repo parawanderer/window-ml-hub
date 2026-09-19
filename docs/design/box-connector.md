@@ -93,15 +93,28 @@ to the account root, the scope its leaf grants, and the agreement key to wrap to
 already authenticated by the time the connector sees it. A connector that was handed a LIST of devices instead
 would be trusting whoever handed it the list, which on this design is the hub.
 
-- **A revoked device is still granted one**, until its certificate expires: a connector has no allowlist and nothing
-  tells it about a revocation. That is the concrete instance of the gap [`revocation.md`](revocation.md) proposes to
-  close, and it is stated here rather than left to be discovered.
-- **A refusal is silence.** The common refusal never reaches the connector at all: a command from a principal whose
-  certificate does not grant `view` fails in `Receiver::open`, so there is nothing to answer it with. The asker
-  learns it worked when the grant arrives, and that the connector is there from presence.
-- **A grant covers the whole key.** The stream key is generated when a connector starts, so "everything this key
-  covered" is one run of it, and a restart is a rotation nobody has to coordinate: the new key has a new id, and a
-  device that held the old one asks again when frames stop opening.
+- ~~**A revoked device is still granted one**, until its certificate expires.~~ A connector follows the account's
+  revocation list now (`revoked.rs`, [`revocation.md`](revocation.md)). It learns who may sign one from presence,
+  verifying the chain itself, and reads that principal's retained `revocations` channel, so a list published while it
+  was away arrives on reconnect. It keeps what it applied on disk, rotates its key when a list names somebody new,
+  and refuses the new key to anything the list names, including every device a revoked delegate paired.
+- **Silence is an outage, not a bypass.** Once a connector has seen a revoker or applied a list, it refuses NEW grants
+  while its list is more than 7 days old (`FRESHNESS_FLOOR_MS`, decided 2026-09-19). The revoker re-signs on every
+  reconnect and daily, so an honest hub always delivers a younger one. A hub that withheld lists could otherwise keep
+  a revoked device receiving grants for the life of its certificate. A device already reading keeps reading; the
+  floor stops only new grants. Before a connector has ever seen a revoker it grants as before, because an account
+  with nobody to sign lists has no list to be fresh; what that leaves open is a hub that hides the revoker from a
+  connector's first connection onwards.
+- **Most refusals are silence, and a revocation refusal is answered.** The common refusal never reaches the connector
+  at all: a command from a principal whose certificate does not grant `view` fails in `Receiver::open`. But a
+  `box.grant` refused because of the list is answered with a sealed result naming the command's nonce: `revoked`, or
+  `stale <ms>` with the epoch milliseconds since which the revoker has not been heard from. The device can then say
+  that box access pauses until the revoker is back, where silence would read as a broken box. A device that does not
+  expect a result for `box.grant` ignores it.
+- **A grant covers the key from where it starts.** The stream key is generated when a connector starts and replaced
+  when a revocation names somebody new, so a restart and a rotation look the same to a device: a new key id, and a
+  device that held the old one asks again when frames stop opening. A grant covers the new key from the first counter
+  it sealed, so nothing sealed under the old key opens with it.
 - **The channels are named for the connector's principal**, not for a label: `channel(purpose, principal_id)` under
   the account's channel key. A device knows the principal from the paired-devices list and the channel key from its
   own pairing, so it can name the channels without being told, and two boxes an operator called the same thing do

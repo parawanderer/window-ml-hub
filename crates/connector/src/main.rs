@@ -15,7 +15,7 @@ use wmlhub_client::{Client, Config};
 use wmlhub_connector::pair::{Offer, PAIRING_WINDOW};
 use wmlhub_connector::relay::Channels;
 use wmlhub_connector::run::{Connector, PENDING_FRAMES};
-use wmlhub_connector::serve::Serving;
+use wmlhub_connector::serve::{Revoking, Serving};
 use wmlhub_connector::state::State;
 use wmlhub_connector::{Target, state::Keys};
 use wmlhub_keys::{hex, principal_id, verify_chain};
@@ -208,6 +208,19 @@ async fn run(args: Run) -> ExitCode {
         Ok(key) => key,
         Err(e) => return fail(&format!("no random source: {e}")),
     };
+    // Who is revoked, as this connector last knew it. Loaded before connecting: a connector that cannot read it must
+    // not start granting as if nobody were.
+    let revocations = match state.revocations(&ready.account_root) {
+        Ok(revocations) => revocations,
+        Err(e) => return fail(&format!("cannot read what this connector knew about revocations: {e}")),
+    };
+    if let Some(armed_at) = revocations.armed_at() {
+        tracing::info!(
+            armed_at,
+            list = ?revocations.held().map(|held| held.version),
+            "following the account's revocation list; new grants stop if it goes a week without one"
+        );
+    }
 
     let (frames_tx, mut frames_rx) = mpsc::channel(PENDING_FRAMES);
     let (published_tx, published_rx) = watch::channel(None);
@@ -240,7 +253,8 @@ async fn run(args: Run) -> ExitCode {
     // The grant carries this connector's own chain, which is how a device checks that the key it was handed came
     // from the publisher it is subscribed to rather than from the hub.
     let publisher = Sender { identity: &ready.publisher_identity, chain: &ready.chain };
-    let mut serving = Serving::new(publisher, &key, channels, published_tx);
+    let revoking = Revoking { channel_key: &ready.channel_key, revocations, state: &state };
+    let mut serving = Serving::new(publisher, key, channels, revoking, published_tx);
     let stopped = tokio::select! {
         stopped = serving.run(&mut client, &mut frames_rx, &now_ms) => Some(stopped),
         _ = tokio::signal::ctrl_c() => None,

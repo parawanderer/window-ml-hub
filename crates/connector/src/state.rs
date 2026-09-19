@@ -9,10 +9,15 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use wmlhub_keys::{Identity, hex};
+use std::collections::BTreeSet;
+
+use wmlhub_keys::revocation::verify_revocations;
+use wmlhub_keys::{Identity, PublicKey, hex};
 use wmlhub_proto::prost::Message;
-use wmlhub_proto::v1::PairedWith;
+use wmlhub_proto::v1::{PairedWith, RevocationBody, RevocationList};
 use wmlhub_seal::AgreementKey;
+
+use crate::revoked::Revocations;
 
 /// The Ed25519 seed this connector signs with, hex.
 const IDENTITY_FILE: &str = "identity.key";
@@ -20,6 +25,11 @@ const IDENTITY_FILE: &str = "identity.key";
 const AGREEMENT_FILE: &str = "agreement.key";
 /// The `PairedWith` a pairing handed over, as it arrived: the certificate, the account root, the channel key.
 const PAIRED_FILE: &str = "paired";
+/// The revocation list this connector applies, as it arrived, so a restart does not forget who is revoked.
+const REVOCATIONS_FILE: &str = "revocations";
+/// When the freshness floor armed and which principals were seen holding `may_revoke`: `armed <ms>`, then one hex
+/// principal id a line. Its absence is the one state in which the floor does not apply.
+const REVOKERS_FILE: &str = "revokers";
 
 /// A connector's state directory.
 pub struct State {
@@ -80,6 +90,78 @@ impl State {
     pub fn write_paired(&self, paired: &PairedWith) -> io::Result<()> {
         self.make_dir()?;
         self.write_secret(PAIRED_FILE, &paired.encode_to_vec(), true)
+    }
+
+    /// What this connector knew about revocations when it last ran, for the account whose root is `root`.
+    ///
+    /// The held list is verified again, AS OF WHEN IT WAS SIGNED. Its signer's certificate may have lapsed since, and a
+    /// revoker whose certificate expired must not make a connector forget whom it revoked: the chain was valid when
+    /// the list was applied, and that is what this checks. A file that does not verify is an error, as a key file
+    /// that does not decode is: what it says is who must not be granted anything, and guessing is not an option.
+    pub fn revocations(&self, root: &PublicKey) -> io::Result<Revocations> {
+        let held = match self.read(REVOCATIONS_FILE)? {
+            None => None,
+            Some(bytes) => {
+                let bad = |why: &str| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("{} {why}", self.dir.join(REVOCATIONS_FILE).display()),
+                    )
+                };
+                let list = RevocationList::decode(bytes.as_slice()).map_err(|_| bad("is not a revocation list"))?;
+                let body = RevocationBody::decode(list.body.as_slice()).map_err(|_| bad("is not a revocation list"))?;
+                let held = verify_revocations(root, &list, body.version, None)
+                    .map_err(|e| bad(&format!("no longer verifies ({e:?})")))?;
+                Some(held)
+            }
+        };
+        let (mut revokers, mut armed_at) = (BTreeSet::new(), None);
+        if let Some(bytes) = self.read(REVOKERS_FILE)? {
+            let text = String::from_utf8(bytes).map_err(|_| self.garbled(REVOKERS_FILE))?;
+            for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+                match line.strip_prefix("armed ") {
+                    Some(ms) => armed_at = Some(ms.parse().map_err(|_| self.garbled(REVOKERS_FILE))?),
+                    None => {
+                        revokers.insert(unhex(line).ok_or_else(|| self.garbled(REVOKERS_FILE))?);
+                    }
+                }
+            }
+        }
+        Ok(Revocations::new(*root, held, revokers, armed_at))
+    }
+
+    /// Keep the list just applied, replacing the one before. Written aside and renamed into place, so a crash leaves
+    /// the old list or the new one and never half of either.
+    pub fn write_revocation_list(&self, list: &RevocationList) -> io::Result<()> {
+        self.make_dir()?;
+        self.replace_atomically(REVOCATIONS_FILE, &list.encode_to_vec())
+    }
+
+    /// Keep when the floor armed and which revokers this connector has seen.
+    pub fn write_revokers(&self, revocations: &Revocations) -> io::Result<()> {
+        self.make_dir()?;
+        let mut text = String::new();
+        if let Some(ms) = revocations.armed_at() {
+            text.push_str(&format!("armed {ms}\n"));
+        }
+        for principal in revocations.revokers() {
+            text.push_str(&hex(principal));
+            text.push('\n');
+        }
+        self.replace_atomically(REVOKERS_FILE, text.as_bytes())
+    }
+
+    fn replace_atomically(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
+        let aside = format!("{name}.new");
+        self.write_secret(&aside, bytes, true)?;
+        fs::rename(self.dir.join(&aside), self.dir.join(name))
+    }
+
+    fn garbled(&self, name: &str) -> io::Error {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} is not what a connector wrote", self.dir.join(name).display()),
+        )
     }
 
     fn seed(&self, name: &str) -> io::Result<Option<[u8; 32]>> {
@@ -190,6 +272,60 @@ mod tests {
         let path = std::env::temp_dir().join(format!("wmlbox-state-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&path);
         path
+    }
+
+    #[test]
+    fn who_is_revoked_survives_a_restart_and_its_signer_lapsing() {
+        use wmlhub_keys::revocation::sign_revocations;
+        use wmlhub_keys::{CertSpec, account_id, issue, principal_id, scope};
+        use wmlhub_proto::v1::Role;
+
+        const SIGNED_AT: u64 = 1_800_000_000_000;
+        let root = Identity::from_seed([1; 32]);
+        let revoker = Identity::from_seed([2; 32]);
+        let spec = |subject: &Identity, may_revoke: bool| CertSpec {
+            subject: subject.public(),
+            agreement_key: [9; 32],
+            role: Role::Client,
+            scopes: vec![scope::VIEW.into()],
+            may_pair: false,
+            may_revoke,
+            // the revoker's certificate lapses an hour after it signs
+            not_before_ms: SIGNED_AT - 3_600_000,
+            not_after_ms: SIGNED_AT + 3_600_000,
+            label: String::new(),
+        };
+        let revoker_chain = vec![issue(&root, &spec(&revoker, true)).unwrap()];
+        let phone = Identity::from_seed([3; 32]);
+        let phone_chain = vec![issue(&root, &spec(&phone, false)).unwrap()];
+        let list = sign_revocations(
+            &revoker,
+            &revoker_chain,
+            account_id(&root.public()),
+            SIGNED_AT,
+            &[principal_id(&phone.public())],
+            &[],
+        );
+
+        let state = State::at(dir("revocations"));
+        assert!(state.revocations(&root.public()).unwrap().armed_at().is_none(), "nothing kept: not armed");
+        let mut kept = state.revocations(&root.public()).unwrap();
+        kept.apply(&list, SIGNED_AT).unwrap();
+        state.write_revocation_list(&list).unwrap();
+        state.write_revokers(&kept).unwrap();
+
+        // A restart a day later, the revoker's certificate long lapsed: the list it signed still stands.
+        let back = state.revocations(&root.public()).unwrap();
+        assert_eq!(back.armed_at(), Some(SIGNED_AT));
+        assert_eq!(back.revokers().collect::<Vec<_>>(), vec![&principal_id(&revoker.public())]);
+        let a_day_later = SIGNED_AT + 24 * 3_600_000;
+        assert_eq!(back.may_grant(&phone_chain, a_day_later), Err(crate::revoked::NotNow::Revoked));
+
+        // and a file that is not a list is refused, loudly, rather than read as "nobody is revoked"
+        // (written privately, so what is wrong with it is its contents and not its permissions)
+        state.write_secret(REVOCATIONS_FILE, b"not a list", true).unwrap();
+        let err = state.revocations(&root.public()).unwrap_err();
+        assert!(err.to_string().contains("is not a revocation list"), "{err}");
     }
 
     #[test]

@@ -4,6 +4,7 @@
 //! What is actually being checked is the rule the design turns on: every frame reaches the subscriber BYTE FOR BYTE,
 //! on the channel its kind belongs to, and nothing an edge carries is ever coalesced or dropped.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,8 +16,10 @@ use wmlhub::registry::{OpenLimits, Registration, Registry};
 use wmlhub_box::schema::{EventFrame, InfoResponse};
 use wmlhub_client::{Client, Config, Event};
 use wmlhub_connector::grant::GRANT_COMMAND;
+use wmlhub_connector::revoked::Revocations;
 use wmlhub_connector::run::PENDING_FRAMES;
-use wmlhub_connector::serve::Serving;
+use wmlhub_connector::serve::{Revoking, Serving};
+use wmlhub_connector::state::State;
 use wmlhub_connector::{Channels, Events, Relay, Relayed, Target};
 use wmlhub_keys::{CertSpec, Identity, issue, principal_id, scope};
 use wmlhub_proto::v1::{Certificate, Kind, Role};
@@ -123,6 +126,15 @@ struct Device {
 
 impl Device {
     fn new(root: &Identity, seed: u8, role: Role, scopes: &[&str]) -> Self {
+        Self::issued(root, seed, role, scopes, false)
+    }
+
+    /// The runtime the root allowed to sign the account's revocation lists.
+    fn revoker(root: &Identity, seed: u8) -> Self {
+        Self::issued(root, seed, Role::Runtime, &[], true)
+    }
+
+    fn issued(root: &Identity, seed: u8, role: Role, scopes: &[&str], may_revoke: bool) -> Self {
         let identity_seed = [seed; 32];
         let identity = Identity::from_seed(identity_seed);
         let agreement_seed = [seed.wrapping_add(90); 32];
@@ -134,7 +146,7 @@ impl Device {
                 role,
                 scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
                 may_pair: false,
-                may_revoke: false,
+                may_revoke,
                 not_before_ms: now_ms() - 3_600_000,
                 not_after_ms: now_ms() + 3_600_000,
                 label: String::new(),
@@ -173,6 +185,11 @@ fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
 }
 
+/// A connector that has never heard of a revoker: grants as it did before revocation existed.
+fn nobody_revoked<'a>(root: &Identity, channel_key: &'a ChannelKey, state: &'a State) -> Revoking<'a> {
+    Revoking { channel_key, revocations: Revocations::new(root.public(), None, BTreeSet::new(), None), state }
+}
+
 #[tokio::test]
 async fn a_boxs_frames_reach_a_subscriber_byte_for_byte_on_the_right_channels() {
     let script = script();
@@ -205,7 +222,7 @@ async fn a_boxs_frames_reach_a_subscriber_byte_for_byte_on_the_right_channels() 
     // the connector reads the box and republishes every frame
     let target = Target::parse(&box_url).unwrap();
     let mut events = Events::open(&target, Some(60_000)).await.unwrap();
-    let mut relay = Relay::new(connector.sender(), &key, channels.clone());
+    let mut relay = Relay::new(connector.sender(), key, channels.clone());
     let mut landed = Vec::new();
     for _ in 0..script.len() {
         let frame = events.next_frame().await.unwrap();
@@ -324,11 +341,13 @@ async fn a_reconnect_asks_for_what_it_missed_and_publishes_nothing_twice() {
         sample: channel_key.channel("box.samples", b"mlbox").to_vec(),
     };
     let key = StreamKey::from_bytes([19; 32]);
+    let state = State::at(state_dir("reconnect-state"));
 
     let (tx, mut rx) = mpsc::channel(PENDING_FRAMES);
     let (published_tx, published_rx) = watch::channel(None);
     let mut conn = wmlhub_connector::Connector::new(Target::parse(&box_url).unwrap(), tx, published_rx);
-    let mut serving = Serving::new(connector.sender(), &key, channels, published_tx);
+    let mut serving =
+        Serving::new(connector.sender(), key, channels, nobody_revoked(&root, &channel_key, &state), published_tx);
 
     let first = conn.pass(&now_ms).await.unwrap();
     assert_eq!(first.forwarded, 3, "everything the first connection carried");
@@ -373,10 +392,12 @@ async fn a_device_that_may_view_asks_for_the_key_and_reads_the_stream() {
     phone_client.command(&connector.recipient(), scope::VIEW, GRANT_COMMAND.as_bytes()).await.unwrap();
 
     let key = StreamKey::generate().unwrap();
+    let state = State::at(state_dir("granted-state"));
     let (tx, mut rx) = mpsc::channel(PENDING_FRAMES);
     let (published_tx, published_rx) = watch::channel(None);
     let mut conn = wmlhub_connector::Connector::new(Target::parse(&box_url).unwrap(), tx, published_rx);
-    let mut serving = Serving::new(connector.sender(), &key, channels.clone(), published_tx);
+    let revoking = nobody_revoked(&root, &channel_key, &state);
+    let mut serving = Serving::new(connector.sender(), key, channels.clone(), revoking, published_tx);
 
     let reading = async {
         let mut readers: Vec<StreamReader> = Vec::new();
@@ -424,4 +445,118 @@ async fn a_device_that_may_view_asks_for_the_key_and_reads_the_stream() {
     };
     assert_eq!(granted, 2, "one grant per channel, both from asking once");
     assert_eq!(serving.counts().granted, 1, "and the connector answered exactly one command");
+}
+
+/// What a device got back for asking the connector for its key.
+#[derive(Debug, PartialEq)]
+enum Answer {
+    /// both wrapped keys arrived
+    Granted,
+    /// a result, naming why not
+    Refused(Vec<u8>),
+}
+
+async fn ask(device: &mut Client, connector: &Device) -> Answer {
+    device.command(&connector.recipient(), scope::VIEW, GRANT_COMMAND.as_bytes()).await.unwrap();
+    let mut keys = 0;
+    loop {
+        match next(device, "a grant or a refusal").await {
+            Event::Unopened { .. } => {
+                keys += 1;
+                if keys == 2 {
+                    return Answer::Granted;
+                }
+            }
+            Event::Result(result) => return Answer::Refused(result.body),
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_revoked_device_is_refused_the_rest_read_on_and_a_week_of_silence_stops_new_grants() {
+    let hub_url = start_hub("revoked").await;
+    let root = Identity::from_seed([35; 32]);
+    let connector = Device::new(&root, 36, Role::BoxConnector, &[]);
+    let revoker = Device::revoker(&root, 37);
+    let phone = Device::new(&root, 38, Role::Client, &[scope::VIEW]);
+    let tablet = Device::new(&root, 39, Role::Client, &[scope::VIEW]);
+
+    let mut client = Client::connect(connector.config(&hub_url, &root)).await.unwrap();
+    // The connector has never heard of a revoker. It learns of this one from presence, verifies the chain itself, and
+    // follows its list from then on.
+    let mut revoker_client = Client::connect(revoker.config(&hub_url, &root)).await.unwrap();
+    let mut phone_client = Client::connect(phone.config(&hub_url, &root)).await.unwrap();
+    let mut tablet_client = Client::connect(tablet.config(&hub_url, &root)).await.unwrap();
+
+    let channel_key = ChannelKey::from_bytes([40; 32]);
+    let channels = Channels {
+        edge: channel_key.channel("box.edges", &connector.id()).to_vec(),
+        sample: channel_key.channel("box.samples", &connector.id()).to_vec(),
+    };
+    let state = State::at(state_dir("revoked-state"));
+    // The connector's clock, which this test moves a week on without waiting one. The hub and the devices keep real
+    // time, so only the connector's own decisions see the jump.
+    let clock = Arc::new(std::sync::atomic::AtomicU64::new(now_ms()));
+    let connector_now = {
+        let clock = clock.clone();
+        move || clock.load(std::sync::atomic::Ordering::Relaxed)
+    };
+    let (_frames_tx, mut frames) = mpsc::channel(PENDING_FRAMES);
+    let (published_tx, _published_rx) = watch::channel(None);
+    let revoking = nobody_revoked(&root, &channel_key, &state);
+    let mut serving =
+        Serving::new(connector.sender(), StreamKey::generate().unwrap(), channels, revoking, published_tx);
+
+    let script = async {
+        assert_eq!(ask(&mut phone_client, &connector).await, Answer::Granted, "before any list");
+
+        let list = wmlhub_keys::revocation::sign_revocations(
+            &revoker.identity,
+            &revoker.chain,
+            wmlhub_keys::account_id(&root.public()),
+            now_ms(),
+            &[phone.id()],
+            &[],
+        );
+        let revocations = channel_key.channel("revocations", &revoker.id());
+        revoker_client.publish(&revocations, Kind::SessionEvents, list.encode_to_vec().into()).await.unwrap();
+
+        // The list and the phone's next ask reach the connector by different routes, so the phone asks until the
+        // list has landed. What it must never do is stay granted.
+        let mut refused = None;
+        for _ in 0..50 {
+            match ask(&mut phone_client, &connector).await {
+                Answer::Refused(why) => {
+                    refused = Some(why);
+                    break;
+                }
+                Answer::Granted => tokio::time::sleep(Duration::from_millis(50)).await,
+            }
+        }
+        assert_eq!(refused.as_deref(), Some(&b"revoked"[..]), "the phone is told, rather than met with silence");
+        assert_eq!(ask(&mut tablet_client, &connector).await, Answer::Granted, "and the tablet reads on");
+
+        // A week and a day with nothing from the revoker: nobody new is granted, and the refusal says since when.
+        let listed = clock.load(std::sync::atomic::Ordering::Relaxed);
+        clock.store(
+            listed + wmlhub_connector::revoked::FRESHNESS_FLOOR_MS + 86_400_000,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        match ask(&mut tablet_client, &connector).await {
+            Answer::Refused(why) => assert!(why.starts_with(b"stale "), "{}", String::from_utf8_lossy(&why)),
+            Answer::Granted => panic!("granted on a list more than a week old"),
+        }
+    };
+    tokio::select! {
+        _ = script => {}
+        e = serving.run(&mut client, &mut frames, &connector_now) => panic!("the connector stopped: {e:?}"),
+    }
+    let counts = serving.counts();
+    assert_eq!((counts.lists, counts.rotations), (1, 1), "one list, naming somebody new, so one rotation");
+    assert!(counts.revoked >= 2, "the phone once, and the tablet after a week of silence");
+
+    // and it is written down: a restart knows the phone is revoked without hearing the list again
+    let kept = state.revocations(&root.public()).unwrap();
+    assert!(kept.held().is_some_and(|held| held.revokes(&phone.chain)));
 }
