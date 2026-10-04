@@ -72,6 +72,28 @@ that the runtime is away and says so to the person.
 - **The rings are a cache.** The authority is the runtime (saved sessions) and the box (its own ring), so a lost hub
   node costs a reconnect and a backfill, not data.
 
+**A ring is a BUDGET, and a publisher that emits continuously spends everybody's share of it.** The ring is per
+stream and counted in ENVELOPES, so what it holds is a length of time that depends entirely on how fast the stream's
+noisiest producer emits — and a session's stream carries one producer's previews beside the events that are the
+session's record.
+
+window-ml found this one from the far end, and the numbers are worth keeping because nothing about them is specific
+to that feature. A streamed agent run emitted a live preview of the model's output every 90 ms, which is reasonable
+for a reader in the same process. Over a hub it filled the 512-envelope ring in **46 seconds** and evicted the
+session's own steps, so a device that woke mid-run backfilled previews of one step and no history. Pacing the remote
+preview to 500 ms took the same ring to about four minutes. (The measured cost of the traffic itself was the smaller
+half of that finding: 118 MB uploaded over five minutes to deliver 73 KB of text, because each preview carried
+everything generated so far.)
+
+Two things follow for anything new that publishes on `SESSION_EVENTS`:
+
+- **Decide what the ring is FOR on that stream, and pace everything else below it.** A preview, a progress figure, a
+  heartbeat: these are worth a frame when somebody is watching and worth nothing in a backfill, and they are exactly
+  what evicts the frames a backfill exists to carry.
+- **Remember that this kind neither coalesces nor drops.** `TELEMETRY` has `coalesce` for a stream of samples whose
+  latest one is the only interesting one; `SESSION_EVENTS` does not, because a record cannot thin itself. A
+  subscriber that cannot keep up is disconnected instead, which is what a phone on a slow link gets.
+
 ## What the hub can see, and what publishers should do about it
 
 The hub sees, for every envelope: the account, the sender, the recipient or channel, the kind, the size, the time and,
