@@ -1318,7 +1318,7 @@ dependencies = [
 
 [[package]]
 name = "wmlhub"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "clap",
  "futures-util",
@@ -1335,7 +1335,7 @@ dependencies = [
 
 [[package]]
 name = "wmlhub-box"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "prost",
  "prost-build",
@@ -1346,7 +1346,7 @@ dependencies = [
 
 [[package]]
 name = "wmlhub-client"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "futures-util",
  "tokio",
@@ -1359,7 +1359,7 @@ dependencies = [
 
 [[package]]
 name = "wmlhub-connector"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "clap",
  "getrandom",
@@ -1378,11 +1378,11 @@ dependencies = [
 
 [[package]]
 name = "wmlhub-frame"
-version = "0.4.2"
+version = "0.4.3"
 
 [[package]]
 name = "wmlhub-keys"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "ed25519-dalek",
  "getrandom",
@@ -1392,7 +1392,7 @@ dependencies = [
 
 [[package]]
 name = "wmlhub-loadgen"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "clap",
  "futures-util",
@@ -1405,7 +1405,7 @@ dependencies = [
 
 [[package]]
 name = "wmlhub-proto"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "bytes",
  "prost",
@@ -1416,7 +1416,7 @@ dependencies = [
 
 [[package]]
 name = "wmlhub-relay"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "arbitrary",
  "wmlhub-proto",
@@ -1424,7 +1424,7 @@ dependencies = [
 
 [[package]]
 name = "wmlhub-seal"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "aes-gcm",
  "getrandom",

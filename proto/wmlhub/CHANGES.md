@@ -17,7 +17,7 @@ Everything so far is additive: a peer that has never seen a field does not send 
 field ignores it. Nothing here has required a reader to change to keep working; two have required a reader to change
 to keep being CORRECT, and they are marked.
 
-## unreleased — `Welcome.features`, so an absent answer can mean something
+## v0.4.3 — `Welcome.features`, so an absent answer can mean something
 
 **Additive; nothing a reader has today changes.** Read this if you act on `Welcome.revoker` being ABSENT. The
 window-ml session found the hole the day v0.4.2 landed: v0.4.2 bumped no major and announced nothing, so an absent
