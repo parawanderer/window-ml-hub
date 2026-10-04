@@ -525,7 +525,11 @@ mod tests {
             matches!(again.claim_revoker(&[1; 32], &signer(8, NOW + 1, WINDOW), NOW + 1), Ok(Revoker::Second { .. })),
             "a restart must not hand the account to whoever reconnects first"
         );
-        assert_eq!(again.revoker(&[1; 32], NOW).map(|s| s.certificate), Some(vec![7; 200]));
+        // The WHOLE record, not just who it names. The shape of this assertion is the mlbox agent's, from checking a
+        // real upgrade: the signer reconnected a second after the restart, so a hub that had forgotten the record and
+        // let it re-claim the account would print the same principal, and only a `since_ms` that had moved would say
+        // so. Asserting the key alone passes against a hub that forgot and relearned.
+        assert_eq!(again.revoker(&[1; 32], NOW), Some(signer(7, NOW, WINDOW)), "read back, never rewritten");
     }
 
     #[test]

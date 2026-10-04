@@ -56,6 +56,34 @@ tailscale serve --bg --https=443 http://127.0.0.1:8787
 
 Clients then connect to `wss://<machine>.<tailnet>.ts.net`.
 
+**Serve and HTTPS certificates have to be enabled for the tailnet first, and the failure is a hang rather than an
+error.** The command prints an enable link and waits for somebody to follow it; it does not exit non-zero, and
+piping it into `head` or `tail` holds the link back until an EOF that never comes, so what you see is a command that
+never returns. Enabling it is a tailnet-admin action, so whoever is setting the hub up may not be able to finish
+this step at all. The check that needs no running command is:
+
+```bash
+tailscale status --json | jq .CertDomains     # null = HTTPS certificates are off for this tailnet
+```
+
+Enabling HTTPS also publishes your machine names to the public Certificate Transparency logs, which is a decision
+rather than a step.
+
+**Any port works, and the hub's name is not the port.** `--https=8787` keeps 443 free for whatever else may want
+the bare name later. `WMLHUB_HUB_NAME` stays the bare hostname either way, because that is what is signed into
+every login; only the URL clients are configured with carries the port
+(`wss://<machine>.<tailnet>.ts.net:8787`).
+
+**A plain `GET` to the hub returns 502, and that is the hub working.** It drops anything that is not a websocket
+upgrade, and the proxy reports the dropped upstream, so a browser visit is the one check you should not trust. Ask
+for the upgrade instead:
+
+```bash
+curl -s -i -N --http1.1 -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+  -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+  https://<name>:<port>/ | head -1          # want: HTTP/1.1 101 Switching Protocols
+```
+
 ### Caddy (public, automatic HTTPS)
 
 Point a DNS record for your hub name at the machine, open ports 80 and 443, then:
@@ -159,6 +187,12 @@ preserve and no migration to run. Concretely, an upgrade costs the seconds the c
 
 So the only reason to delete an account is to change something the account itself holds, and session history is not
 it.
+
+**It is not without interruption, though.** Measured twice on a real box (v0.4.0 to v0.4.2, then to v0.4.3): the
+container is recreated and a runtime reconnects 0.7 to 1.0 seconds after the hub is serving again. What is not
+preserved is the CONNECTION, so anything measuring how long a client has been connected starts again from the
+restart. If somebody is watching a long-lived connection, tell them before you upgrade: a figure read out of a log
+that has a restart in it is not the figure they think it is.
 
 **One upgrade has a visible consequence**, from the version that began enforcing one revocation signer per account:
 the hub starts with no record of who signs, so the first device that logs in holding `may_revoke` claims the account.
