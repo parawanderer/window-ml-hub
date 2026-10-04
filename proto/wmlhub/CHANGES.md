@@ -17,7 +17,7 @@ Everything so far is additive: a peer that has never seen a field does not send 
 field ignores it. Nothing here has required a reader to change to keep working; two have required a reader to change
 to keep being CORRECT, and they are marked.
 
-## unreleased — `Welcome.revoker`: who may sign this account's revocations
+## v0.4.2 — `Welcome.revoker`: who may sign this account's revocations
 
 **Additive; nothing a reader has today changes.** A client that wants to know whether its account has a revocation
 signer reads this; everybody else ignores it. Pin this to show "no device signs removals on this account", or to
@@ -32,6 +32,11 @@ default a pairing grant correctly when the signer is offline.
   itself and a single `verify_chain` settles it. A reader that trusts the field unchecked hands the hub a lever it
   does not otherwise have, because an account that never had a revoker has no freshness floor to arm.
 - Absent means NO RECORD, which is also what an older hub sends, so it reads as unknown rather than as proof of none.
+- **Not a schema change, but visible on the wire in the same release**: a hello holding `may_revoke` for an account
+  that already has a different signer is refused, `Error{UNAUTHENTICATED}`, "another device signs this account's
+  revocations; pair this one again without that grant". A client that never grants `may_revoke` twice never meets
+  it. The record is spent when the grant it recorded expires, so an account recovers from a signer that never
+  returns without the operator (`wmlhub accounts clear-revoker` is for not waiting).
 
 ## v0.4.0 — `RevocationList`, and a box connector that honours one
 
