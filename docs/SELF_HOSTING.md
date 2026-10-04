@@ -83,11 +83,26 @@ only the first account to use it is registered. Other devices of that same accou
 
 ```bash
 docker compose exec hub wmlhub invite list       # outstanding invites
-docker compose exec hub wmlhub accounts list     # registered accounts
+docker compose exec hub wmlhub accounts list     # registered accounts, and each one's revocation signer
 ```
 
 To withdraw an invite before it is used, delete its file: `invite list` shows the start of its name, and the file is
 in the `invites` directory of the data volume.
+
+### One device signs an account's revocations
+
+An account removes a lost or stolen device by publishing a signed revocation list, and **exactly one** of its devices
+may sign that list (`may_revoke`, granted at pairing). The hub holds the account to it: a second device presenting
+that grant is refused its login, with "another device signs this account's revocations; pair this one again without
+that grant". The reason is not tidiness. A list's version is a timestamp, so two signers race, and the one whose
+clock trails has its removal refused as stale: the device you were removing stays.
+
+`accounts list` says which principal signs for each account. When that device is the one that is gone, forget it, and
+the next device granted `may_revoke` takes over:
+
+```bash
+docker compose exec hub wmlhub accounts clear-revoker <account-id>
+```
 
 ## Registration
 

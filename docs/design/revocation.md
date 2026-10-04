@@ -242,6 +242,41 @@ removes the account's ability to revoke anything**, until the root grants it aga
 should refuse to revoke without saying so, and a holder revoking itself should be refused outright.
 
 
+### Enforcing the one signer (2026-10-04, window-ml `tmp/handover-one-revocation-signer.md`)
+
+"Exactly one principal holds it at a time" above was an intention, and the chat-page session found it was not a
+fact: window-ml's `defaultGrant` handed `may_revoke` to every runtime it paired, so pairing a second browser on the
+defaults silently produced a second signer. The symptom they were chasing came from the other end entirely, a
+`may_revoke` certificate being unrenewable, and the one that matters is the one this doc already names: with two
+signers, the one whose clock or stored state trails signs a `version` the publisher has passed, and **a removal of a
+lost device fails silently**.
+
+**The hub enforces it, at `Hello`, and admission is the only lever it has.** The check cannot be done by the issuer:
+to know whether another signer exists, a client needs the whole account, which it gets only by asking an online
+runtime for its device list — best effort, racy between two devices pairing at once, and unavailable in exactly the
+state that needs it. The hub sees every connection of an account with none of that. What it cannot do is anything
+narrower than refusing the connection: a channel name is an HMAC it cannot read, so it cannot tell revocation
+traffic from any other publish, and it cannot strip `may_revoke` from a chain the root signed. So a second signer is
+refused its login, with a message naming the fix rather than the rule.
+
+**The first claim wins, and a later grant does not take over by being later.** The tempting rule is "the newest
+certificate wins", which sounds like the handover this doc wants to allow and is backwards in the common case:
+pairing a device carelessly issues the newest grant there is, so the careless act would displace the working signer
+and the refusal would land on a laptop nobody was touching, hours later. The two readings of a second grant are
+identical from the hub, so it keeps the record and refuses the arrival, where somebody is standing.
+
+**Re-placing the signer is therefore an operator's act**: `wmlhub accounts clear-revoker <account>`, after which the
+next device granted `may_revoke` becomes the one that signs. That is the recovery story for a lost laptop, and it is
+also how an account that acquired two signers before this was enforced chooses between them. The record is one file
+per account in the state directory (`revokers/<account>`), so it survives a restart: without that, the account would
+go to whichever signer reconnected first.
+
+What is deliberately NOT built: a `replaces` field on a `may_revoke` certificate, by which the root would name the
+signer it is displacing and no operator would be needed. It is the better end state and it is a schema change for a
+case that happens once per lost laptop, on a hub whose operator is currently the same person. Worth doing when a hub
+serves accounts its operator does not own.
+
+
 ## Why not simpler
 
 - **"Let the hub revoke."** Then the hub is the account. Never, and it is the same answer as in `pairing.md`.
