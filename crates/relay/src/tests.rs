@@ -25,7 +25,7 @@ fn join(h: &mut Hub, account: &str, principal: &str, role: Role) -> ConnId {
 }
 
 fn join_at(h: &mut Hub, account: &str, principal: &str, role: Role, mono_ms: u64) -> ConnId {
-    let (id, _) = h.connect(acct(account), &hello(principal, role), NOW, mono_ms, None).unwrap();
+    let (id, _) = h.connect(acct(account), &hello(principal, role), NOW, mono_ms, Revoker::Unknown).unwrap();
     h.take_outbound(id, usize::MAX);
     id
 }
@@ -138,7 +138,7 @@ fn a_command_cannot_reach_a_principal_in_another_account_even_when_it_is_online(
 fn presence_never_crosses_accounts() {
     let mut h = hub();
     let a = join(&mut h, "alice", "rt", Role::Runtime);
-    let (m, _) = h.connect(acct("mallory"), &hello("phone", Role::Client), NOW, 0, None).unwrap();
+    let (m, _) = h.connect(acct("mallory"), &hello("phone", Role::Client), NOW, 0, Revoker::Unknown).unwrap();
     assert_eq!(out(&mut h, m), ["welcome"]);
     assert!(out(&mut h, a).is_empty());
 }
@@ -147,7 +147,7 @@ fn presence_never_crosses_accounts() {
 fn the_same_principal_id_may_exist_in_two_accounts() {
     let mut h = hub();
     join(&mut h, "alice", "rt", Role::Runtime);
-    assert!(h.connect(acct("bob"), &hello("rt", Role::Runtime), NOW, 0, None).is_ok());
+    assert!(h.connect(acct("bob"), &hello("rt", Role::Runtime), NOW, 0, Revoker::Unknown).is_ok());
 }
 
 // ------------------------------ principals ------------------------------
@@ -156,15 +156,15 @@ fn the_same_principal_id_may_exist_in_two_accounts() {
 fn a_second_connection_for_an_online_principal_is_refused() {
     let mut h = hub();
     join(&mut h, "alice", "rt", Role::Runtime);
-    let err = h.connect(acct("alice"), &hello("rt", Role::Runtime), NOW, 0, None).unwrap_err();
+    let err = h.connect(acct("alice"), &hello("rt", Role::Runtime), NOW, 0, Revoker::Unknown).unwrap_err();
     assert_eq!(show(&[*err]), ["error Unauthenticated ref=0"]);
 }
 
 #[test]
 fn a_refused_hello_leaves_no_account_behind() {
     let mut h = Hub::new(Limits { max_accounts: 1, ..Limits::default() }, 1).unwrap();
-    assert!(h.connect(acct("x"), &hello("", Role::Client), NOW, 0, None).is_err());
-    assert!(h.connect(acct("y"), &hello("p", Role::Client), NOW, 0, None).is_ok());
+    assert!(h.connect(acct("x"), &hello("", Role::Client), NOW, 0, Revoker::Unknown).is_err());
+    assert!(h.connect(acct("y"), &hello("p", Role::Client), NOW, 0, Revoker::Unknown).is_ok());
 }
 
 #[test]
@@ -185,7 +185,7 @@ fn the_hub_stamps_the_sender_whatever_the_peer_claims() {
 fn a_new_connection_sees_who_is_online_and_others_see_it_arrive_and_leave() {
     let mut h = hub();
     let rt = join(&mut h, "alice", "rt", Role::Runtime);
-    let (phone, _) = h.connect(acct("alice"), &hello("phone", Role::Client), NOW, 0, None).unwrap();
+    let (phone, _) = h.connect(acct("alice"), &hello("phone", Role::Client), NOW, 0, Revoker::Unknown).unwrap();
     assert_eq!(out(&mut h, phone), ["welcome", "presence rt on"]);
     assert_eq!(out(&mut h, rt), ["presence phone on"]);
     h.close(phone, None);
@@ -197,7 +197,7 @@ fn an_empty_account_is_forgotten() {
     let mut h = Hub::new(Limits { max_accounts: 1, ..Limits::default() }, 1).unwrap();
     let c = join(&mut h, "a", "p", Role::Client);
     h.close(c, None);
-    assert!(h.connect(acct("b"), &hello("p", Role::Client), NOW, 0, None).is_ok());
+    assert!(h.connect(acct("b"), &hello("p", Role::Client), NOW, 0, Revoker::Unknown).is_ok());
 }
 
 // ------------------------------ publish and subscribe ------------------------------
@@ -423,8 +423,8 @@ fn resubscribing_with_envelopes_still_queued_delivers_each_seq_once_in_order() {
 fn shards_hand_out_connection_ids_that_never_collide() {
     let mut a = Hub::with_id_space(Limits::default(), 1, 0).unwrap();
     let mut b = Hub::with_id_space(Limits::default(), 1, 1).unwrap();
-    let ida = a.connect(acct("x"), &hello("p", Role::Client), NOW, 0, None).unwrap().0;
-    let idb = b.connect(acct("x"), &hello("p", Role::Client), NOW, 0, None).unwrap().0;
+    let ida = a.connect(acct("x"), &hello("p", Role::Client), NOW, 0, Revoker::Unknown).unwrap().0;
+    let idb = b.connect(acct("x"), &hello("p", Role::Client), NOW, 0, Revoker::Unknown).unwrap().0;
     assert_ne!(ida, idb);
     assert_eq!(idb >> 48, 1);
 }
@@ -558,7 +558,7 @@ fn connecting_costs_the_account_and_a_flood_of_handshakes_is_refused() {
     // more slowly yet: a client that only connects and disconnects would otherwise cost an account nothing.
     let mut h = budgeted(1_000);
     let opened = |h: &mut Hub, n: u32| {
-        h.connect(acct("a"), &hello(&format!("p{n}"), Role::Client), NOW, 0, None).map(|(id, _)| id)
+        h.connect(acct("a"), &hello(&format!("p{n}"), Role::Client), NOW, 0, Revoker::Unknown).map(|(id, _)| id)
     };
     let mut open = Vec::new();
     for n in 0..64 {
@@ -569,7 +569,7 @@ fn connecting_costs_the_account_and_a_flood_of_handshakes_is_refused() {
                 assert!(message.contains("try again in"), "it says how long to wait: {message}");
                 assert!(n > 1, "the first connection of an account is never refused");
                 // and the debt clears: a second later it is admitted again
-                let later = h.connect(acct("a"), &hello("later", Role::Client), NOW, 10_000, None);
+                let later = h.connect(acct("a"), &hello("later", Role::Client), NOW, 10_000, Revoker::Unknown);
                 assert!(later.is_ok(), "the account earned its way back: {later:?}");
                 return;
             }
@@ -584,14 +584,14 @@ fn one_accounts_handshakes_do_not_refuse_anothers() {
     // a spends until it is refused
     let mut refused = false;
     for n in 0..64 {
-        if h.connect(acct("a"), &hello(&format!("p{n}"), Role::Client), NOW, 0, None).is_err() {
+        if h.connect(acct("a"), &hello(&format!("p{n}"), Role::Client), NOW, 0, Revoker::Unknown).is_err() {
             refused = true;
             break;
         }
     }
     assert!(refused, "the point of this test is a in debt");
     assert!(
-        h.connect(acct("b"), &hello("rt", Role::Runtime), NOW, 0, None).is_ok(),
+        h.connect(acct("b"), &hello("rt", Role::Runtime), NOW, 0, Revoker::Unknown).is_ok(),
         "b connects as if a did not exist"
     );
 }
@@ -605,7 +605,7 @@ fn a_busy_account_can_still_connect_a_device() {
     let (wait, _) = h.charge(rt, 10_500, 1_000);
     assert!(wait > 0, "the runtime is in debt and being read more slowly");
     assert!(wait <= CONNECT_REFUSED_ABOVE_MS, "but not by anything like enough to refuse a device");
-    assert!(h.connect(acct("a"), &hello("phone", Role::Client), NOW, 1_000, None).is_ok());
+    assert!(h.connect(acct("a"), &hello("phone", Role::Client), NOW, 1_000, Revoker::Unknown).is_ok());
 }
 
 #[test]
@@ -659,9 +659,9 @@ fn presence_carries_the_chain_of_whoever_came_online() {
     let mut h = hub();
     let chain = vec![Certificate { body: vec![1; 200], signature: vec![2; 64] }];
     let phone_hello = v1::Hello { chain: chain.clone(), ..hello("phone", Role::Client) };
-    let (phone, _) = h.connect(acct("a"), &phone_hello, NOW, 0, None).unwrap();
+    let (phone, _) = h.connect(acct("a"), &phone_hello, NOW, 0, Revoker::Unknown).unwrap();
     // connected without draining: the presence backfill arrives in the same burst as the welcome
-    let (rt, _) = h.connect(acct("a"), &hello("rt", Role::Runtime), NOW, 0, None).unwrap();
+    let (rt, _) = h.connect(acct("a"), &hello("rt", Role::Runtime), NOW, 0, Revoker::Unknown).unwrap();
 
     // the runtime is told about the phone as it joins, with the chain
     let seen = drain(&mut h, rt);
@@ -674,7 +674,7 @@ fn presence_carries_the_chain_of_whoever_came_online() {
     // and the phone is told about the runtime as IT joins
     h.take_outbound(phone, usize::MAX);
     let joining = v1::Hello { chain: chain.clone(), ..hello("laptop", Role::Client) };
-    h.connect(acct("a"), &joining, NOW, 0, None).unwrap();
+    h.connect(acct("a"), &joining, NOW, 0, Revoker::Unknown).unwrap();
     let live = drain(&mut h, phone);
     let presence = live.iter().find_map(|f| match &f.body {
         Some(Body::Presence(p)) if p.principal == b"laptop" => Some(p.clone()),
@@ -690,8 +690,8 @@ fn a_chain_too_large_to_carry_is_left_out_rather_than_echoed() {
     let mut h = hub();
     let huge = vec![Certificate { body: vec![1; 4_000], signature: vec![2; 64] }];
     let phone_hello = v1::Hello { chain: huge, ..hello("phone", Role::Client) };
-    h.connect(acct("a"), &phone_hello, NOW, 0, None).unwrap();
-    let (rt, _) = h.connect(acct("a"), &hello("rt", Role::Runtime), NOW, 0, None).unwrap();
+    h.connect(acct("a"), &phone_hello, NOW, 0, Revoker::Unknown).unwrap();
+    let (rt, _) = h.connect(acct("a"), &hello("rt", Role::Runtime), NOW, 0, Revoker::Unknown).unwrap();
     let seen = drain(&mut h, rt);
     let presence = seen.iter().find_map(|f| match &f.body {
         Some(Body::Presence(p)) if p.principal == b"phone" => Some(p.clone()),
@@ -705,7 +705,7 @@ fn a_departure_carries_no_chain() {
     let mut h = hub();
     let chain = vec![Certificate { body: vec![1; 200], signature: vec![2; 64] }];
     let phone_hello = v1::Hello { chain, ..hello("phone", Role::Client) };
-    let (phone, _) = h.connect(acct("a"), &phone_hello, NOW, 0, None).unwrap();
+    let (phone, _) = h.connect(acct("a"), &phone_hello, NOW, 0, Revoker::Unknown).unwrap();
     let rt = join(&mut h, "a", "rt", Role::Runtime);
     h.take_outbound(rt, usize::MAX);
     h.close(phone, None);
@@ -736,11 +736,47 @@ fn connect_costs() {
         let start = Instant::now();
         for i in 0..N {
             let principal = format!("joiner-{i}");
-            let (id, _) = h.connect(acct("a"), &hello(&principal, Role::Client), NOW, 0, None).unwrap();
+            let (id, _) = h.connect(acct("a"), &hello(&principal, Role::Client), NOW, 0, Revoker::Unknown).unwrap();
             h.take_outbound(id, usize::MAX);
             h.close(id, None);
         }
         let each = start.elapsed() / N;
         eprintln!("{siblings} siblings: connect + disconnect {each:?}");
     }
+}
+
+// --- what the welcome says about an account's revocation signer ---
+
+/// The welcome of a fresh connection, for the three things the server can say about a signer.
+fn welcome_of(revoker: Revoker) -> v1::Welcome {
+    let mut h = Hub::new(Limits::default(), 1).unwrap();
+    let (id, _) = h.connect(acct("a"), &hello("p", Role::Client), NOW, 0, revoker).unwrap();
+    drain(&mut h, id)
+        .into_iter()
+        .find_map(|f| match f.body {
+            Some(Body::Welcome(w)) => Some(w),
+            _ => None,
+        })
+        .expect("a welcome")
+}
+
+#[test]
+fn a_server_that_keeps_no_record_claims_nothing_about_a_signer() {
+    // The same absent certificate as "this account has none", which is why the feature has to carry the difference:
+    // a client that cannot tell them apart would warn about every hub older than the record.
+    let w = welcome_of(Revoker::Unknown);
+    assert_eq!(w.revoker, None);
+    assert!(w.features.is_empty());
+}
+
+#[test]
+fn a_server_that_keeps_one_says_so_whether_or_not_the_account_has_a_signer() {
+    let none = welcome_of(Revoker::None);
+    assert_eq!(none.revoker, None, "this account has no signer");
+    assert_eq!(none.features, [FEATURE_REVOKER], "and the silence is an answer");
+
+    let cert = Certificate { body: vec![1, 2, 3], signature: vec![4, 5] };
+    let known = welcome_of(Revoker::Known(cert.clone()));
+    assert_eq!(known.revoker, Some(cert), "echoed, never read: the relay takes no decision on it");
+    assert_eq!(known.features, [FEATURE_REVOKER]);
 }

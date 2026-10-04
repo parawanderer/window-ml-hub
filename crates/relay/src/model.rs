@@ -23,7 +23,7 @@ use std::collections::{HashMap, HashSet};
 use arbitrary::{Arbitrary, Unstructured};
 use wmlhub_proto::v1::{self, Envelope, Frame, Kind, Role, envelope::To, frame::Body};
 
-use crate::{AccountId, Action, ConnId, Hub, Limits, StreamKey};
+use crate::{AccountId, Action, ConnId, Hub, Limits, Revoker, StreamKey};
 
 // Small on purpose: operations collide on the same accounts, principals and streams often enough to build the
 // interleavings that break things. With 3/4/3 the random walk and 52k fuzz runs both missed an in-place coalescing
@@ -204,7 +204,7 @@ impl Model {
                     role: Role::Client as i32,
                     ..Default::default()
                 };
-                match self.hub.connect(account_id(account), &hello, 0, self.now_ms, None) {
+                match self.hub.connect(account_id(account), &hello, 0, self.now_ms, Revoker::Unknown) {
                     Ok((conn, actions)) => {
                         self.slots.push(Slot { conn, account, principal });
                         actions

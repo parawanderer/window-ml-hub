@@ -468,10 +468,12 @@ async fn the_welcome_names_the_account_s_signer_as_something_a_client_can_verify
     let issued = now_ms() - 3_600_000;
 
     // Before anybody holds the grant: absent, which is the state a client must be able to see, because it is the
-    // one that means removals cannot be signed at all.
+    // one that means removals cannot be signed at all. It can only see it because the hub SAYS it keeps the record:
+    // an absent certificate from a hub that does not is the same bytes and means nothing.
     let (_a, answer, _) = login(&url, &root, &device(&root, 50, Role::Client), b"", Tamper::default()).await;
     let Body::Welcome(welcome) = &answer else { panic!("welcomed, not {answer:?}") };
     assert_eq!(welcome.revoker, None, "no device of this account holds may_revoke");
+    assert!(welcome.features.iter().any(|f| f == "revoker"), "and the hub says that absence means something");
 
     let signer = revoker(&root, 51, issued);
     let (_rt, answer, _) = login(&url, &root, &signer, b"", Tamper::default()).await;
@@ -481,6 +483,7 @@ async fn the_welcome_names_the_account_s_signer_as_something_a_client_can_verify
     // so a client takes no security decision on the hub's word. A hub inventing a signer would have to forge this.
     let (_b, answer, _) = login(&url, &root, &device(&root, 52, Role::Client), b"", Tamper::default()).await;
     let Body::Welcome(welcome) = &answer else { panic!("welcomed, not {answer:?}") };
+    assert!(welcome.features.iter().any(|f| f == "revoker"));
     let cert = welcome.revoker.clone().expect("the account has a signer by now");
     let verified = wmlhub_keys::verify_chain(&root.public(), &[cert], now_ms()).expect("signed by the account root");
     assert!(verified.leaf.may_revoke);

@@ -305,8 +305,17 @@ hub would have quietly removed revocation as a capability, and nothing anywhere 
 
 `may_revoke` is issued by the account root itself, never delegated, so the signer's certificate is one certificate
 signed by the root: a reader checks it with the same `verify_chain` it already runs on a presence chain, and a hub
-that invents a signer has to forge a root signature. Absent means "no record", which is also what an older hub
-sends, so a reader treats it as unknown rather than as proof of none.
+that invents a signer has to forge a root signature.
+
+**And the hub has to say that it keeps the record at all**, which the first version of this did not. An absent
+certificate is the same bytes from a hub that holds no signer and from one that has never heard of the field, so the
+chat-page session could build the pairing default on it (which acts on a signer that IS named) and not the warning
+(which acts on silence) — a warning that fires against every older hub is one people learn to dismiss. So
+`Welcome.features` carries the name `"revoker"`, and absence means "no signer" only beside it. Not a protocol major:
+a hub refuses a hello whose `protocol` is below its own, so a bump locks out every existing client at the next
+restart, which is a heavy price for one bit. And not a present-but-empty certificate, which proto3 can express and
+which would collapse the two answers back together at the one call a reader makes, since an empty certificate fails
+to verify exactly as a corrupt one does.
 
 
 ## Why not simpler
