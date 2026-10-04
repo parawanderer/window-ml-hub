@@ -1,6 +1,6 @@
 [package]
 name = "wmlhub-keys"
-version = "0.1.0"
+version.workspace = true
 description = "Identities, certificate chains and the signed hello for the window.ml hub"
 edition.workspace = true
 rust-version.workspace = true

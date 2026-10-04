@@ -77,11 +77,23 @@ jobs:
           echo "name=$name" >> "$GITHUB_OUTPUT"
       # Proof it runs on the machine that built it, before it is published. A release whose binary cannot start is
       # worse than no release: every consumer finds out separately.
-      - name: It runs
+      #
+      # AND THAT IT KNOWS WHICH BUILD IT IS. The workspace version sat at 0.1.0 through v0.2.0, v0.3.0 and v0.4.0,
+      # so every binary reported the same number and "which build is this?" could not be answered from the thing
+      # running. A tag whose version was not bumped now fails here instead of shipping that.
+      - name: It runs, and says the version of the tag it came from
         run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          want="${tag#v}"
           tar -xzf "dist/${{ steps.pack.outputs.name }}.tar.gz" -C "${{ runner.temp }}"
-          "${{ runner.temp }}/${{ steps.pack.outputs.name }}/wmlhub" --version
-          "${{ runner.temp }}/${{ steps.pack.outputs.name }}/wmlbox" --version
+          for bin in wmlhub wmlbox; do
+            got=$("${{ runner.temp }}/${{ steps.pack.outputs.name }}/$bin" --version | awk '{print $NF}')
+            echo "$bin reports $got"
+            if [ "$got" != "$want" ]; then
+              echo "::error::$bin reports $got but the tag is $tag. Set \`version\` in [workspace.package] to $want before tagging."
+              exit 1
+            fi
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.pack.outputs.name }}

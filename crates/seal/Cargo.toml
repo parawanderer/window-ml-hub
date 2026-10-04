@@ -1,6 +1,6 @@
 [package]
 name = "wmlhub-seal"
-version = "0.1.0"
+version.workspace = true
 description = "Sealed, signed commands between principals of the window.ml hub (end-to-end, the hub never opens them)"
 edition.workspace = true
 rust-version.workspace = true

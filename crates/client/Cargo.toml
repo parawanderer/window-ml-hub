@@ -1,6 +1,6 @@
 [package]
 name = "wmlhub-client"
-version = "0.1.0"
+version.workspace = true
 description = "A client for the window.ml hub: the authenticated handshake, subscriptions, and sealed commands"
 edition.workspace = true
 rust-version.workspace = true

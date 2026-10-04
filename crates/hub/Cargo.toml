@@ -1,6 +1,6 @@
 [package]
 name = "wmlhub"
-version = "0.1.0"
+version.workspace = true
 description = "The window.ml hub: a websocket relay that reads envelopes and forwards ciphertext"
 edition.workspace = true
 rust-version.workspace = true
