@@ -1,6 +1,6 @@
 [package]
 name = "wmlhub-connector"
-version = "0.1.0"
+version.workspace = true
 description = "The box connector: reads a box's /api/events and republishes it through a hub, sealed"
 edition.workspace = true
 rust-version.workspace = true

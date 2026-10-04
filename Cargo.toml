@@ -3,6 +3,11 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
+# THE VERSION IS THE TAG. Every binary reports it (`--version`), nothing here is published to crates.io, and no crate
+# pins another by version — so one number for the workspace is the whole truth, and `release.yml` refuses to publish a
+# tag this does not match. It had sat at 0.1.0 through v0.2.0, v0.3.0 and v0.4.0, which made "which build is this?"
+# unanswerable from the binary that was running.
+version = "0.4.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"

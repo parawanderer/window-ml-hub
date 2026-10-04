@@ -1,6 +1,6 @@
 [package]
 name = "wmlhub-loadgen"
-version = "0.1.0"
+version.workspace = true
 description = "Load generator for the window.ml hub: throughput, latency percentiles, memory per connection"
 edition.workspace = true
 rust-version.workspace = true

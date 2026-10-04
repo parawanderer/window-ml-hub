@@ -1,6 +1,6 @@
 [package]
 name = "wmlhub-box"
-version = "0.1.0"
+version.workspace = true
 description = "The box connector's reading of an /api/events frame: which channel it belongs on, without decoding it"
 edition.workspace = true
 rust-version.workspace = true
