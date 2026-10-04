@@ -50,7 +50,32 @@ fn presentable(chain: &[Certificate]) -> Vec<Certificate> {
 }
 
 /// The protocol major this relay speaks.
+///
+/// A hello BELOW it is refused, which is what makes a bump a hard break: every client of the old major is locked out
+/// on the hub's restart, with nothing it can do but ship a new version first. So a major is for a change that cannot
+/// be expressed additively, and telling a peer about an optional behaviour is not one. That is `Welcome.features`.
 pub const PROTOCOL: u32 = 1;
+
+/// `Welcome.features`: this hub keeps a record of each account's revocation signer, so `Welcome.revoker` being absent
+/// means the account HAS none rather than that the hub cannot say.
+pub const FEATURE_REVOKER: &str = "revoker";
+
+/// What the server can say about an account's revocation signer. Three answers, and the two that look alike on the
+/// wire are the reason this is a type rather than an `Option`.
+///
+/// A client decides whether to grant `may_revoke` to the device somebody is pairing, and whether to warn that
+/// nothing here can sign removals. "No signer" justifies both; "I cannot tell you" justifies neither, and a warning
+/// built on the two being one answer would fire against every hub that predates the record. So `Unknown` announces
+/// no feature and `None` announces one, and the absent certificate means something different in each.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Revoker {
+    /// This server keeps no such record: development mode, or this relay embedded without one. It claims nothing.
+    Unknown,
+    /// It keeps the record, and this account has no signer.
+    None,
+    /// The signer on record, as the certificate the account root signed.
+    Known(Certificate),
+}
 
 /// An account, as the server resolved it from a `Hello`'s credential. Opaque to the relay.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -236,7 +261,8 @@ impl Hub {
     /// `revoker` is the account's revocation signer, which the relay only ECHOES into the `Welcome`: who may sign is
     /// the server's record to keep (`wmlhub::registry`), and no relay decision reads it. It is carried here rather
     /// than sent as a frame of its own because the welcome is the one thing every connection is told about its
-    /// account, and a second frame would be a second thing to order against presence.
+    /// account, and a second frame would be a second thing to order against presence. Whether the server keeps that
+    /// record at all is what [`FEATURE_REVOKER`] announces, because an absent certificate cannot say it.
     /// `now_ms` is the wall clock, which goes into `Welcome.server_time_ms`, and `mono_ms` is the server's monotonic
     /// clock, which is the only one the work budget may see. They are separate arguments because mixing them here is
     /// a bug this code has already had: a bucket created at a wall-clock 1.8 x 10^12 and charged at a monotonic
@@ -247,7 +273,7 @@ impl Hub {
         hello: &v1::Hello,
         now_ms: u64,
         mono_ms: u64,
-        revoker: Option<Certificate>,
+        revoker: Revoker,
     ) -> Result<(ConnId, Vec<Action>), Box<Frame>> {
         let role = hello.role();
         if hello.protocol < PROTOCOL {
@@ -303,8 +329,18 @@ impl Hub {
             armed: false,
             throttle_notice_ms: None,
         };
-        let welcome =
-            v1::Welcome { protocol: PROTOCOL, server_time_ms: now_ms, limits: Some(self.limits.announce()), revoker };
+        let (revoker, features) = match revoker {
+            Revoker::Unknown => (Option::None, Vec::new()),
+            Revoker::None => (Option::None, vec![FEATURE_REVOKER.to_owned()]),
+            Revoker::Known(certificate) => (Some(certificate), vec![FEATURE_REVOKER.to_owned()]),
+        };
+        let welcome = v1::Welcome {
+            protocol: PROTOCOL,
+            server_time_ms: now_ms,
+            limits: Some(self.limits.announce()),
+            revoker,
+            features,
+        };
         // A fresh queue holds these without trouble; a failure here would be a limits misconfiguration.
         let _ = conn.out.push_frame(&Frame { body: Some(Body::Welcome(welcome)) }, &self.limits);
         for (principal, (other, r)) in &acct.online {

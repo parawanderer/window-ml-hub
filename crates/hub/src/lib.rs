@@ -25,7 +25,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use wmlhub_proto::v1::{self, Frame, error::Code, frame::Body};
 use wmlhub_proto::{decode_frames_shared, encode_frames, join_frames};
-use wmlhub_relay::{AccountId, Action, ConnId, FRAME_COST_BYTES, Hub, Limits};
+use wmlhub_relay::{AccountId, Action, ConnId, FRAME_COST_BYTES, Hub, Limits, Revoker};
 
 use registry::{Refusal, Registry};
 
@@ -251,7 +251,7 @@ impl Shared {
         account: AccountId,
         hello: &v1::Hello,
         handle: Arc<Handle>,
-        revoker: Option<v1::Certificate>,
+        revoker: Revoker,
     ) -> Result<ConnId, Box<Frame>> {
         let max = self.config.limits.max_accounts;
         let mut wake = Vec::new();
@@ -715,8 +715,8 @@ async fn send(sink: &mut Sink, frames: &[Frame], max_frame: usize) -> Result<(),
 /// A hello that got in: which account, and what that account is told about itself.
 struct Admitted {
     account: AccountId,
-    /// the account's revocation signer, echoed into `Welcome.revoker`
-    revoker: Option<v1::Certificate>,
+    /// the account's revocation signer, echoed into `Welcome` with the feature that makes its absence mean something
+    revoker: Revoker,
 }
 
 /// Hold the account to one revocation signer, for a hello whose verified leaf carries `may_revoke`.
@@ -773,7 +773,7 @@ fn authenticate(auth: &Auth, hello: &v1::Hello, nonce: &[u8; 32], address: IpAdd
             if hello.account_credential.is_empty() {
                 return Err(refuse(Code::Unauthenticated, "an account credential is required"));
             }
-            Ok(Admitted { account: AccountId(hello.account_credential.clone()), revoker: None })
+            Ok(Admitted { account: AccountId(hello.account_credential.clone()), revoker: Revoker::Unknown })
         }
         Auth::Keys { hub_name, registry } => {
             // One message for every verification failure: which check failed is for the server's log, not for
@@ -813,11 +813,16 @@ fn authenticate(auth: &Auth, hello: &v1::Hello, nonce: &[u8; 32], address: IpAdd
                     }
                     // What every connection of the account is told about it: who may sign its revocations, as the
                     // certificate the signer presented, for a client to verify under the root rather than believe.
-                    let signer = registry.revoker(&verified.account, now);
-                    Ok(Admitted {
-                        account: AccountId(verified.account.to_vec()),
-                        revoker: signer.and_then(|s| wmlhub_proto::prost::Message::decode(&s.certificate[..]).ok()),
-                    })
+                    // NONE rather than UNKNOWN when there is no record, which is the whole point of the distinction:
+                    // this hub keeps one, so a client may build "nothing here can sign removals" on the silence. A
+                    // record whose certificate no longer decodes is treated as none, as every other unreadable
+                    // record is.
+                    let revoker = match registry.revoker(&verified.account, now) {
+                        Some(s) => wmlhub_proto::prost::Message::decode(&s.certificate[..])
+                            .map_or(Revoker::None, Revoker::Known),
+                        std::option::Option::None => Revoker::None,
+                    };
+                    Ok(Admitted { account: AccountId(verified.account.to_vec()), revoker })
                 }
                 Err(Refusal::InviteRequired) => {
                     Err(refuse(Code::Unauthenticated, "this hub needs an invite to register an account"))

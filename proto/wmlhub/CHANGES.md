@@ -17,6 +17,22 @@ Everything so far is additive: a peer that has never seen a field does not send 
 field ignores it. Nothing here has required a reader to change to keep working; two have required a reader to change
 to keep being CORRECT, and they are marked.
 
+## unreleased — `Welcome.features`, so an absent answer can mean something
+
+**Additive; nothing a reader has today changes.** Read this if you act on `Welcome.revoker` being ABSENT. The
+window-ml session found the hole the day v0.4.2 landed: v0.4.2 bumped no major and announced nothing, so an absent
+`revoker` is indistinguishable from a hub that has never heard of the field, and a warning built on it ("no device
+signs removals on this account") would fire against every older hub. Correct for the pairing default, which only
+acts on a signer that IS named; useless for the warning, which acts on silence.
+
+- `Welcome.features` (`repeated string`): the optional behaviours this hub implements. A reader tests for the name it
+  needs and ignores the rest, so a fork may add its own.
+- `"revoker"` means `Welcome.revoker` is this hub's record of the account's signer, so absent means the account HAS
+  none. Without the name, absent means the hub cannot say.
+- **Not a protocol major, deliberately.** A hub refuses a hello whose `protocol` is BELOW its own, so bumping the
+  major locks out every client of the old one at the hub's next restart. A major is for a change that cannot be
+  expressed additively, and announcing an optional behaviour is not one.
+
 ## v0.4.2 — `Welcome.revoker`: who may sign this account's revocations
 
 **Additive; nothing a reader has today changes.** A client that wants to know whether its account has a revocation
