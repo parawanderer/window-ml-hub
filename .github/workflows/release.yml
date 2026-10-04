@@ -1,0 +1,115 @@
+# release.yml — the binaries a tag ships: `wmlhub` and `wmlbox`, built from that tag and attached to its release.
+#
+# It exists so that nobody has to clone this repo and run cargo to USE a release. window-ml's test suite talks to a
+# real hub rather than a mock (tests/fixtures/hub-harness.mjs), and before this the only way to get one was a local
+# `cargo build --release` — so thirty integration tests were skipped on every CI run there, and ran only on a machine
+# where somebody had built the pinned tag by hand.
+#
+# The tag is the unit, deliberately: a consumer pins a version (window-ml's `HUB_TAG`) and gets the same bytes every
+# time, rather than whatever main happened to be. `workflow_dispatch` takes a tag so a release made before this
+# workflow existed can still be given its binaries.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The tag to build and attach binaries to (e.g. v0.4.0)"
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The two that are actually consumed: CI runners and self-hosters on x86-64 Linux, and development on an
+          # Apple Silicon Mac. Another target belongs here when something needs it, not before.
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: macos-14
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The TAG, never the branch this ran from: a dispatched run is pointed at a release that already exists.
+          ref: ${{ inputs.tag || github.ref }}
+      # rust-toolchain.toml pins the version; this installs exactly that, as ci.yml does.
+      - name: Toolchain
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      # Two commands rather than one with several `-p` and several `--bin`: if a target is ever renamed, the failure
+      # names the package it belongs to instead of reporting that some bin among several does not exist.
+      - name: Build
+        run: |
+          cargo build --release --locked --target ${{ matrix.target }} -p wmlhub --bin wmlhub
+          cargo build --release --locked --target ${{ matrix.target }} -p wmlhub-connector --bin wmlbox
+      # One archive per target holding both binaries, plus the checksum a consumer verifies before running it. A
+      # downloaded binary that is executed unchecked is a supply chain with no links in it.
+      - name: Package
+        id: pack
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          name="wmlhub-${tag}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/wmlhub" "target/${{ matrix.target }}/release/wmlbox" "dist/$name/"
+          cp LICENSE README.md "dist/$name/" 2>/dev/null || true
+          tar -czf "dist/$name.tar.gz" -C dist "$name"
+          ( cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256" )
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+      # Proof it runs on the machine that built it, before it is published. A release whose binary cannot start is
+      # worse than no release: every consumer finds out separately.
+      - name: It runs
+        run: |
+          tar -xzf "dist/${{ steps.pack.outputs.name }}.tar.gz" -C "${{ runner.temp }}"
+          "${{ runner.temp }}/${{ steps.pack.outputs.name }}/wmlhub" --version
+          "${{ runner.temp }}/${{ steps.pack.outputs.name }}/wmlbox" --version
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pack.outputs.name }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      # `--clobber` so a re-run replaces what it uploaded before rather than failing half way, and so a tag released
+      # before this workflow existed can be given its binaries without being re-cut.
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --title "$tag" --generate-notes
+          gh release upload "$tag" dist/*.tar.gz dist/*.sha256 --clobber
+          echo "Attached $(ls dist/*.tar.gz | wc -l) archive(s) to \`$tag\`." >> "$GITHUB_STEP_SUMMARY"
