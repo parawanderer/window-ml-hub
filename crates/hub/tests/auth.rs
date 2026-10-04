@@ -455,7 +455,34 @@ async fn clearing_the_record_is_how_a_lost_signer_is_replaced() {
     let (_, answer, _) = login(&url, &root, &revoker(&root, 41, issued), b"", Tamper::default()).await;
     assert!(welcomed(&answer));
     assert_eq!(
-        Registry::list_revokers(&dir).unwrap().get(&account).map(|(p, _)| p.clone()),
+        Registry::list_revokers(&dir).unwrap().get(&account).map(|s| s.principal.clone()),
         Some(wmlhub_keys::hex(&principal_id(&Identity::from_seed([41; 32]).public()))),
     );
+}
+
+#[tokio::test]
+async fn the_welcome_names_the_account_s_signer_as_something_a_client_can_verify() {
+    let dir = state_dir("welcome-revoker");
+    let url = start(&dir, Registration::Open, OpenLimits::default()).await;
+    let root = Identity::from_seed([1; 32]);
+    let issued = now_ms() - 3_600_000;
+
+    // Before anybody holds the grant: absent, which is the state a client must be able to see, because it is the
+    // one that means removals cannot be signed at all.
+    let (_a, answer, _) = login(&url, &root, &device(&root, 50, Role::Client), b"", Tamper::default()).await;
+    let Body::Welcome(welcome) = &answer else { panic!("welcomed, not {answer:?}") };
+    assert_eq!(welcome.revoker, None, "no device of this account holds may_revoke");
+
+    let signer = revoker(&root, 51, issued);
+    let (_rt, answer, _) = login(&url, &root, &signer, b"", Tamper::default()).await;
+    assert!(welcomed(&answer));
+
+    // Every device of the account is told, and told as EVIDENCE: the certificate verifies under the account root,
+    // so a client takes no security decision on the hub's word. A hub inventing a signer would have to forge this.
+    let (_b, answer, _) = login(&url, &root, &device(&root, 52, Role::Client), b"", Tamper::default()).await;
+    let Body::Welcome(welcome) = &answer else { panic!("welcomed, not {answer:?}") };
+    let cert = welcome.revoker.clone().expect("the account has a signer by now");
+    let verified = wmlhub_keys::verify_chain(&root.public(), &[cert], now_ms()).expect("signed by the account root");
+    assert!(verified.leaf.may_revoke);
+    assert_eq!(verified.principal, principal_id(&Identity::from_seed([51; 32]).public()));
 }

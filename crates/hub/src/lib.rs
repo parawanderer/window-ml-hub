@@ -251,6 +251,7 @@ impl Shared {
         account: AccountId,
         hello: &v1::Hello,
         handle: Arc<Handle>,
+        revoker: Option<v1::Certificate>,
     ) -> Result<ConnId, Box<Frame>> {
         let max = self.config.limits.max_accounts;
         let mut wake = Vec::new();
@@ -271,7 +272,7 @@ impl Shared {
                 }
                 1
             };
-            let result = st.hub.connect(account, hello, now_ms(), self.clock_ms());
+            let result = st.hub.connect(account, hello, now_ms(), self.clock_ms(), revoker);
             self.reconcile_accounts(&mut st, reserved);
             match result {
                 Ok((id, actions)) => {
@@ -462,7 +463,7 @@ async fn connection(
     if matches!(shared.config.auth, Auth::Keys { .. }) {
         pending.sent_hello();
     }
-    let account = match authenticate(&shared.config.auth, &hello, &nonce, address) {
+    let Admitted { account, revoker } = match authenticate(&shared.config.auth, &hello, &nonce, address) {
         Ok(a) => a,
         Err(frame) => {
             let _ = send(&mut sink, &[*frame], max_frame).await;
@@ -471,7 +472,7 @@ async fn connection(
     };
     let handle = Arc::new(Handle::default());
     let shard = shared.shard_of(&account);
-    let id = match shared.connect(shard, account, &hello, handle.clone()) {
+    let id = match shared.connect(shard, account, &hello, handle.clone(), revoker) {
         Ok(id) => id,
         Err(frame) => {
             let _ = send(&mut sink, &[*frame], max_frame).await;
@@ -711,14 +712,33 @@ async fn send(sink: &mut Sink, frames: &[Frame], max_frame: usize) -> Result<(),
     sink.send(Message::binary(bytes)).await.map_err(|_| ())
 }
 
+/// A hello that got in: which account, and what that account is told about itself.
+struct Admitted {
+    account: AccountId,
+    /// the account's revocation signer, echoed into `Welcome.revoker`
+    revoker: Option<v1::Certificate>,
+}
+
 /// Hold the account to one revocation signer, for a hello whose verified leaf carries `may_revoke`.
 ///
 /// The refusal names the fix rather than the rule, because whoever reads it has just paired a device and is not about
 /// to read docs/design/revocation.md: a second signer is a grant that should not have been made, and pairing again
 /// without it is what resolves it. Both principals are logged, since which device is which is the operator's
 /// question, and `wmlhub accounts clear-revoker` is their answer when the signer is the one that is gone.
-fn revoker(registry: &Arc<Registry>, verified: &wmlhub_keys::Verified, address: IpAddr) -> Result<(), Box<Frame>> {
-    match registry.claim_revoker(&verified.account, &verified.principal, verified.leaf.not_before_ms) {
+fn revoker(
+    registry: &Arc<Registry>,
+    verified: &wmlhub_keys::Verified,
+    certificate: &v1::Certificate,
+    now: u64,
+    address: IpAddr,
+) -> Result<(), Box<Frame>> {
+    let signer = registry::Signer {
+        principal: wmlhub_keys::hex(&verified.principal),
+        since_ms: verified.leaf.not_before_ms,
+        until_ms: verified.leaf.not_after_ms,
+        certificate: wmlhub_proto::prost::Message::encode_to_vec(certificate),
+    };
+    match registry.claim_revoker(&verified.account, &signer, now) {
         Ok(registry::Revoker::Held) => Ok(()),
         Ok(registry::Revoker::Second { holder, since_ms }) => {
             tracing::info!(
@@ -744,14 +764,16 @@ fn revoker(registry: &Arc<Registry>, verified: &wmlhub_keys::Verified, address: 
 }
 
 /// Decide which account a hello belongs to, or refuse it. Verification happens here, before the relay is touched.
-fn authenticate(auth: &Auth, hello: &v1::Hello, nonce: &[u8; 32], address: IpAddr) -> Result<AccountId, Box<Frame>> {
+fn authenticate(auth: &Auth, hello: &v1::Hello, nonce: &[u8; 32], address: IpAddr) -> Result<Admitted, Box<Frame>> {
     let refuse = |code: Code, message: &str| Box::new(error_frame(code, message));
     match auth {
+        // Development mode verifies nothing, so it knows of no grants: an account has no signer here, and the field
+        // is absent rather than guessed at.
         Auth::Development => {
             if hello.account_credential.is_empty() {
                 return Err(refuse(Code::Unauthenticated, "an account credential is required"));
             }
-            Ok(AccountId(hello.account_credential.clone()))
+            Ok(Admitted { account: AccountId(hello.account_credential.clone()), revoker: None })
         }
         Auth::Keys { hub_name, registry } => {
             // One message for every verification failure: which check failed is for the server's log, not for
@@ -786,9 +808,16 @@ fn authenticate(auth: &Auth, hello: &v1::Hello, nonce: &[u8; 32], address: IpAdd
                     // from a chain the root signed. Refusing is still the better failure: the alternative is two
                     // signers racing, where whoever loses has a REVOCATION silently refused as stale.
                     if verified.leaf.may_revoke {
-                        revoker(registry, &verified, address)?;
+                        let leaf = hello.chain.first().expect("a chain that verified has a leaf");
+                        revoker(registry, &verified, leaf, now, address)?;
                     }
-                    Ok(AccountId(verified.account.to_vec()))
+                    // What every connection of the account is told about it: who may sign its revocations, as the
+                    // certificate the signer presented, for a client to verify under the root rather than believe.
+                    let signer = registry.revoker(&verified.account, now);
+                    Ok(Admitted {
+                        account: AccountId(verified.account.to_vec()),
+                        revoker: signer.and_then(|s| wmlhub_proto::prost::Message::decode(&s.certificate[..]).ok()),
+                    })
                 }
                 Err(Refusal::InviteRequired) => {
                     Err(refuse(Code::Unauthenticated, "this hub needs an invite to register an account"))

@@ -271,10 +271,42 @@ also how an account that acquired two signers before this was enforced chooses b
 per account in the state directory (`revokers/<account>`), so it survives a restart: without that, the account would
 go to whichever signer reconnected first.
 
+**A spent record is no record.** `may_revoke` cannot be renewed by a delegate, so the signer's certificate expires
+every 90 days and the root issues another; the same device presents the new one and keeps the account. A device
+REPLACED in the meantime would otherwise need the operator for a grant that is already dead, so the record stands
+only while the grant it recorded is valid. An account therefore recovers from a signer that never comes back on its
+own, at the cost of at most one certificate's length, and `clear-revoker` is for not waiting. It does not reopen the
+careless case: a second grant arriving while the incumbent's is live is still refused.
+
 What is deliberately NOT built: a `replaces` field on a `may_revoke` certificate, by which the root would name the
 signer it is displacing and no operator would be needed. It is the better end state and it is a schema change for a
 case that happens once per lost laptop, on a hub whose operator is currently the same person. Worth doing when a hub
 serves accounts its operator does not own.
+
+### Telling a client, without being believed (2026-10-04, window-ml `tmp/handover-no-signer-at-all.md`)
+
+Enforcing one signer has a consequence the chat-page session named immediately: once a client stops granting
+`may_revoke` by default, the common account has NO signer, and that fails quietly. Their `publishList` returns early
+without one, so a removal updates the runtime's own allowlist, drops the connection, and tells nobody. Every other
+runtime, and the box connector, never learn. A loud failure traded for a silent one, which is the wrong way round.
+
+They can see a co-signer in presence, which carries each online principal's chain, but presence cannot see a signer
+that is ASLEEP. So the hub reports its record: `Welcome.revoker`, the signer's certificate, absent when there is
+none.
+
+**It is the certificate and not the principal id, and that is the whole design.** A client is about to take a
+security decision with it: whether to offer `may_revoke` to the device being paired, and whether to warn that
+nothing can sign removals here. A bare id would make that decision the hub's to steer, and the dangerous direction
+is not the obvious one. A hub HIDING a signer it has is safe: the grant gets offered, and the second signer is
+refused at its own login, in front of whoever is pairing it. A hub CLAIMING a signer that does not exist is not: the
+account never grants one, no list is ever published, and an account that has never seen a revoker has no freshness
+floor to arm (`crates/connector/src/revoked.rs`, `may_grant` returns before the floor when `armed_at` is none). The
+hub would have quietly removed revocation as a capability, and nothing anywhere would say so.
+
+`may_revoke` is issued by the account root itself, never delegated, so the signer's certificate is one certificate
+signed by the root: a reader checks it with the same `verify_chain` it already runs on a presence chain, and a hub
+that invents a signer has to forge a root signature. Absent means "no record", which is also what an older hub
+sends, so a reader treats it as unknown rather than as proof of none.
 
 
 ## Why not simpler

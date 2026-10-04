@@ -232,6 +232,11 @@ impl Hub {
 
     /// Admit a connection whose `Hello` the server has authenticated into `account`. On success the `Welcome` and
     /// the account's presence are queued; on failure the server sends the returned error and closes.
+    ///
+    /// `revoker` is the account's revocation signer, which the relay only ECHOES into the `Welcome`: who may sign is
+    /// the server's record to keep (`wmlhub::registry`), and no relay decision reads it. It is carried here rather
+    /// than sent as a frame of its own because the welcome is the one thing every connection is told about its
+    /// account, and a second frame would be a second thing to order against presence.
     /// `now_ms` is the wall clock, which goes into `Welcome.server_time_ms`, and `mono_ms` is the server's monotonic
     /// clock, which is the only one the work budget may see. They are separate arguments because mixing them here is
     /// a bug this code has already had: a bucket created at a wall-clock 1.8 x 10^12 and charged at a monotonic
@@ -242,6 +247,7 @@ impl Hub {
         hello: &v1::Hello,
         now_ms: u64,
         mono_ms: u64,
+        revoker: Option<Certificate>,
     ) -> Result<(ConnId, Vec<Action>), Box<Frame>> {
         let role = hello.role();
         if hello.protocol < PROTOCOL {
@@ -297,7 +303,8 @@ impl Hub {
             armed: false,
             throttle_notice_ms: None,
         };
-        let welcome = v1::Welcome { protocol: PROTOCOL, server_time_ms: now_ms, limits: Some(self.limits.announce()) };
+        let welcome =
+            v1::Welcome { protocol: PROTOCOL, server_time_ms: now_ms, limits: Some(self.limits.announce()), revoker };
         // A fresh queue holds these without trouble; a failure here would be a limits misconfiguration.
         let _ = conn.out.push_frame(&Frame { body: Some(Body::Welcome(welcome)) }, &self.limits);
         for (principal, (other, r)) in &acct.online {
