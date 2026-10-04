@@ -122,8 +122,17 @@ enum InviteCommand {
 
 #[derive(Subcommand)]
 enum AccountsCommand {
-    /// List registered account ids.
+    /// List registered account ids, and which principal signs each account's revocations.
     List {
+        #[arg(long, env = "WMLHUB_STATE_DIR", default_value = "wmlhub-state")]
+        state_dir: PathBuf,
+    },
+    /// Forget which principal signs an account's revocations, so the next device granted `may_revoke` becomes the
+    /// one that does. For a signer that is gone: a lost laptop, or an account that acquired two before one was
+    /// enforced. The device that held it keeps nothing, since a list it signs is refused as stale by then anyway.
+    ClearRevoker {
+        /// The account id, as `wmlhub accounts list` prints it.
+        account: String,
         #[arg(long, env = "WMLHUB_STATE_DIR", default_value = "wmlhub-state")]
         state_dir: PathBuf,
     },
@@ -169,14 +178,30 @@ async fn main() -> ExitCode {
             }
             Err(e) => fail(&format!("cannot read {}: {e}", state_dir.display())),
         },
-        Command::Accounts { command: AccountsCommand::List { state_dir } } => match Registry::list_accounts(&state_dir)
-        {
-            Ok(accounts) => {
-                accounts.iter().for_each(|a| println!("{a}"));
-                ExitCode::SUCCESS
+        Command::Accounts { command: AccountsCommand::List { state_dir } } => {
+            match (Registry::list_accounts(&state_dir), Registry::list_revokers(&state_dir)) {
+                (Ok(accounts), Ok(revokers)) => {
+                    for a in &accounts {
+                        match revokers.get(a) {
+                            Some((principal, since_ms)) => println!("{a} revoker={principal} since_ms={since_ms}"),
+                            None => println!("{a}"),
+                        }
+                    }
+                    ExitCode::SUCCESS
+                }
+                (Err(e), _) | (_, Err(e)) => fail(&format!("cannot read {}: {e}", state_dir.display())),
             }
-            Err(e) => fail(&format!("cannot read {}: {e}", state_dir.display())),
-        },
+        }
+        Command::Accounts { command: AccountsCommand::ClearRevoker { account, state_dir } } => {
+            match Registry::clear_revoker(&state_dir, &account) {
+                Ok(true) => {
+                    println!("{account}: the next device granted may_revoke becomes its revocation signer");
+                    ExitCode::SUCCESS
+                }
+                Ok(false) => fail(&format!("{account} has no revocation signer on record")),
+                Err(e) => fail(&format!("cannot write {}: {e}", state_dir.display())),
+            }
+        }
     }
 }
 

@@ -65,6 +65,25 @@ fn device(root: &Identity, seed: u8, role: Role) -> Device {
     Device { chain: vec![issue_ok(root, &spec)], key, role }
 }
 
+/// A runtime the root granted `may_revoke`: a revocation signer, which an account may have only one of.
+/// `issued_ms` is the grant's `not_before`, because whether a LATER grant takes over is the question.
+fn revoker(root: &Identity, seed: u8, issued_ms: u64) -> Device {
+    let key = Identity::from_seed([seed; 32]);
+    let spec = CertSpec {
+        subject: key.public(),
+        agreement_key: [5; 32],
+        role: Role::Runtime,
+        scopes: vec![],
+        may_pair: true,
+        may_revoke: true,
+        not_before_ms: issued_ms,
+        // Spanning NOW whatever `issued_ms` is: the grant's age is the question here, its validity never.
+        not_after_ms: issued_ms + 7_200_000,
+        label: format!("signer {seed}"),
+    };
+    Device { chain: vec![issue_ok(root, &spec)], key, role: Role::Runtime }
+}
+
 /// What a hello may be tampered with, one field at a time.
 #[derive(Default)]
 struct Tamper {
@@ -382,4 +401,61 @@ async fn a_stranger_who_fails_slows_the_next_and_one_who_authenticates_does_not(
     // The kernel still completes the TCP handshake into its backlog. The websocket one is not answered.
     let next = tokio::time::timeout(Duration::from_millis(500), tokio_tungstenite::connect_async(&url)).await;
     assert!(next.is_err(), "a refused hello did not pace the next stranger");
+}
+
+// ------------------------------ one revocation signer per account ------------------------------
+
+/// The refusal a second signer gets, as the text it reaches a person as: the hub's only lever here is admission, so
+/// this message is the whole of what window-ml can show someone who has just paired a device wrongly.
+const SECOND_SIGNER: &str = "another device signs this account's revocations; pair this one again without that grant";
+
+#[tokio::test]
+async fn an_account_has_one_revocation_signer_and_a_later_grant_does_not_take_over() {
+    let dir = state_dir("one-revoker");
+    let url = start(&dir, Registration::Open, OpenLimits::default()).await;
+    let root = Identity::from_seed([1; 32]);
+    let issued = now_ms() - 3_600_000;
+
+    let (_first, answer, _) = login(&url, &root, &revoker(&root, 30, issued), b"", Tamper::default()).await;
+    assert!(welcomed(&answer), "the account's first may_revoke grant is its signer");
+
+    // The careless case, and the one a "newest wins" rule would get backwards: pairing a second device issues the
+    // newest grant there is, so a rule that preferred it would displace the working signer and refuse a laptop
+    // nobody is touching. The refusal belongs to the device being paired.
+    let (_, answer, _) = login(&url, &root, &revoker(&root, 31, issued + 60_000), b"", Tamper::default()).await;
+    assert!(matches!(&answer, Body::Error(e) if e.code() == Code::Unauthenticated && e.message == SECOND_SIGNER));
+
+    // Nothing else about the account is touched: an ordinary runtime of it still logs in.
+    let (_, answer, _) = login(&url, &root, &device(&root, 32, Role::Runtime), b"", Tamper::default()).await;
+    assert!(welcomed(&answer));
+
+    // And the record is the hub's, not a connection's: a restart does not hand the account to whoever reconnects
+    // first, which is the whole reason it is on disk.
+    let again = start(&dir, Registration::Open, OpenLimits::default()).await;
+    let (_, answer, _) = login(&again, &root, &revoker(&root, 31, issued + 60_000), b"", Tamper::default()).await;
+    assert!(matches!(&answer, Body::Error(e) if e.message == SECOND_SIGNER), "across a restart");
+    let (_, answer, _) = login(&again, &root, &revoker(&root, 30, issued), b"", Tamper::default()).await;
+    assert!(welcomed(&answer), "the signer on record keeps signing");
+}
+
+#[tokio::test]
+async fn clearing_the_record_is_how_a_lost_signer_is_replaced() {
+    let dir = state_dir("revoker-replace");
+    let url = start(&dir, Registration::Open, OpenLimits::default()).await;
+    let root = Identity::from_seed([1; 32]);
+    let issued = now_ms() - 3_600_000;
+    let lost = revoker(&root, 40, issued);
+    let (_lost, answer, _) = login(&url, &root, &lost, b"", Tamper::default()).await;
+    assert!(welcomed(&answer));
+
+    let account = wmlhub_keys::hex(&account_id(&root.public()));
+    assert!(Registry::clear_revoker(&dir, &account).unwrap(), "the operator forgets the device that is gone");
+
+    // The replacement signs from here, and the hub does not need to have seen the handover to know it happened.
+    let (_, answer, _) = login(&url, &root, &revoker(&root, 41, issued), b"", Tamper::default()).await;
+    assert!(welcomed(&answer));
+    assert_eq!(
+        Registry::list_revokers(&dir).unwrap().get(&account).map(|(p, _)| p.clone()),
+        Some(wmlhub_keys::hex(&principal_id(&Identity::from_seed([41; 32]).public()))),
+    );
 }

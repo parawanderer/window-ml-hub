@@ -711,6 +711,38 @@ async fn send(sink: &mut Sink, frames: &[Frame], max_frame: usize) -> Result<(),
     sink.send(Message::binary(bytes)).await.map_err(|_| ())
 }
 
+/// Hold the account to one revocation signer, for a hello whose verified leaf carries `may_revoke`.
+///
+/// The refusal names the fix rather than the rule, because whoever reads it has just paired a device and is not about
+/// to read docs/design/revocation.md: a second signer is a grant that should not have been made, and pairing again
+/// without it is what resolves it. Both principals are logged, since which device is which is the operator's
+/// question, and `wmlhub accounts clear-revoker` is their answer when the signer is the one that is gone.
+fn revoker(registry: &Arc<Registry>, verified: &wmlhub_keys::Verified, address: IpAddr) -> Result<(), Box<Frame>> {
+    match registry.claim_revoker(&verified.account, &verified.principal, verified.leaf.not_before_ms) {
+        Ok(registry::Revoker::Held) => Ok(()),
+        Ok(registry::Revoker::Second { holder, since_ms }) => {
+            tracing::info!(
+                account = %wmlhub_keys::hex(&verified.account[..6]),
+                %address,
+                principal = %wmlhub_keys::hex(&verified.principal[..6]),
+                holder = %&holder[..12],
+                since_ms,
+                "a second revocation signer was refused"
+            );
+            Err(Box::new(error_frame(
+                Code::Unauthenticated,
+                "another device signs this account's revocations; pair this one again without that grant",
+            )))
+        }
+        Err(Refusal::Storage(e)) => {
+            tracing::error!(error = %e, "registry storage failed recording the revocation signer");
+            Err(Box::new(error_frame(Code::Unavailable, "hub storage error")))
+        }
+        // `claim_revoker` refuses nothing else: admission has already happened by the time it is called.
+        Err(_) => Err(Box::new(error_frame(Code::Unavailable, "hub storage error"))),
+    }
+}
+
 /// Decide which account a hello belongs to, or refuse it. Verification happens here, before the relay is touched.
 fn authenticate(auth: &Auth, hello: &v1::Hello, nonce: &[u8; 32], address: IpAddr) -> Result<AccountId, Box<Frame>> {
     let refuse = |code: Code, message: &str| Box::new(error_frame(code, message));
@@ -746,6 +778,15 @@ fn authenticate(auth: &Auth, hello: &v1::Hello, nonce: &[u8; 32], address: IpAdd
                 Ok(admission) => {
                     if admission == registry::Admission::Registered {
                         tracing::info!(account = %wmlhub_keys::hex(&verified.account[..6]), "account registered");
+                    }
+                    // An account has ONE revocation signer, and this is the only place that can be a fact rather
+                    // than an intention (`Registry::claim_revoker`). A displaced signer is refused the connection,
+                    // because admission is the hub's only lever here: it cannot refuse a principal's revocation
+                    // traffic alone, since a channel is an HMAC it cannot read, and it cannot strip `may_revoke`
+                    // from a chain the root signed. Refusing is still the better failure: the alternative is two
+                    // signers racing, where whoever loses has a REVOCATION silently refused as stale.
+                    if verified.leaf.may_revoke {
+                        revoker(registry, &verified, address)?;
                     }
                     Ok(AccountId(verified.account.to_vec()))
                 }
