@@ -17,6 +17,22 @@ Everything so far is additive: a peer that has never seen a field does not send 
 field ignores it. Nothing here has required a reader to change to keep working; two have required a reader to change
 to keep being CORRECT, and they are marked.
 
+## unreleased — `Welcome.revoker`: who may sign this account's revocations
+
+**Additive; nothing a reader has today changes.** A client that wants to know whether its account has a revocation
+signer reads this; everybody else ignores it. Pin this to show "no device signs removals on this account", or to
+default a pairing grant correctly when the signer is offline.
+
+- `Welcome.revoker` (`Certificate`): the one principal that may sign this account's revocation lists, as the hub has
+  it on record, or absent when no device holds the grant. The hub records the first principal that logs in holding
+  `may_revoke` and refuses a different one while that grant is valid (`docs/design/revocation.md`, "Enforcing the one
+  signer"), so there is at most one to report.
+- **VERIFY IT.** It is a certificate rather than a principal id so that a reader checks it against the account root
+  instead of believing the hub: `may_revoke` is never delegated, so the signer's certificate is signed by the root
+  itself and a single `verify_chain` settles it. A reader that trusts the field unchecked hands the hub a lever it
+  does not otherwise have, because an account that never had a revoker has no freshness floor to arm.
+- Absent means NO RECORD, which is also what an older hub sends, so it reads as unknown rather than as proof of none.
+
 ## v0.4.0 — `RevocationList`, and a box connector that honours one
 
 **Additive; nothing a reader has today changes.** A runtime that signs lists, and a publisher that honours them,

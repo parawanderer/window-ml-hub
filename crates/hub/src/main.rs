@@ -182,9 +182,17 @@ async fn main() -> ExitCode {
             match (Registry::list_accounts(&state_dir), Registry::list_revokers(&state_dir)) {
                 (Ok(accounts), Ok(revokers)) => {
                     for a in &accounts {
+                        // The expiry is printed because a record past it is no longer the answer to "who signs":
+                        // the next device granted `may_revoke` takes the account, with no `clear-revoker` needed.
                         match revokers.get(a) {
-                            Some((principal, since_ms)) => println!("{a} revoker={principal} since_ms={since_ms}"),
-                            None => println!("{a}"),
+                            Some(s) => println!(
+                                "{a} revoker={} since_ms={} until_ms={}{}",
+                                s.principal,
+                                s.since_ms,
+                                s.until_ms,
+                                if s.until_ms <= now_ms() { " (spent)" } else { "" }
+                            ),
+                            None => println!("{a} revoker=none"),
                         }
                     }
                     ExitCode::SUCCESS

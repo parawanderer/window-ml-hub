@@ -90,6 +90,23 @@ pub enum Revoker {
     Second { holder: String, since_ms: u64 },
 }
 
+/// The signer an account has on record: who, the window of the grant it presented, and the grant itself.
+///
+/// The certificate is kept because it is what a CLIENT is told (`Welcome.revoker`): a principal id would be the
+/// hub's word for it, and a client deciding whether to grant `may_revoke` to another device must not take the hub's
+/// word. `may_revoke` is issued by the account root itself, so one certificate verifies on its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Signer {
+    /// principal id, hex
+    pub principal: String,
+    /// `not_before_ms` of the grant it presented
+    pub since_ms: u64,
+    /// `not_after_ms` of that grant: past it the record is spent, and the next grant claims the account
+    pub until_ms: u64,
+    /// the encoded `Certificate`, as the hello presented it
+    pub certificate: Vec<u8>,
+}
+
 /// The registry over a state directory.
 #[derive(Debug)]
 pub struct Registry {
@@ -166,42 +183,55 @@ impl Registry {
     /// which a client gets only by asking an online runtime for its device list. That is best effort, racy between
     /// two devices pairing at once, and unavailable in exactly the state that needs it.
     ///
-    /// THE FIRST CLAIM WINS, and a later grant does not take over by being later. The tempting rule is "the newest
-    /// certificate wins", which sounds like the handover the design wants to allow and is the wrong way round in the
-    /// common case: pairing a second device carelessly issues the newest grant there is, so the careless act would
-    /// silently displace the working signer and the refusal would land on a laptop nobody is touching, later. Both
-    /// readings of a second grant look identical from here, so this holds the one record and refuses the arrival,
-    /// where somebody is standing. Re-placing the signer deliberately is `wmlhub accounts clear-revoker`, an
-    /// operator's act on the hub that serves the account, and [`Revoker::Second`] says so.
+    /// THE FIRST CLAIM WINS while its grant lives, and a later grant does not take over by being later. The tempting
+    /// rule is "the newest certificate wins", which sounds like the handover the design wants to allow and is the
+    /// wrong way round in the common case: pairing a second device carelessly issues the newest grant there is, so
+    /// the careless act would silently displace the working signer and the refusal would land on a laptop nobody is
+    /// touching, later. Both readings of a second grant look identical from here, so this holds the one record and
+    /// refuses the arrival, where somebody is standing.
+    ///
+    /// A SPENT RECORD IS NO RECORD. `may_revoke` cannot be renewed by a delegate (`verify_chain`, `NotDelegable`),
+    /// so the signer's certificate expires and the root issues another; the same device presents the new one and
+    /// keeps the account, but a device replaced in the meantime would otherwise need an operator for a grant that is
+    /// already dead. So the record stands only while the grant it recorded is valid, and the account recovers from a
+    /// signer that never comes back on its own, at the cost of at most one certificate's length.
+    /// `wmlhub accounts clear-revoker` is for not waiting.
     ///
     /// A record that cannot be read or parsed counts as ABSENT rather than refusing every runtime of the account: a
     /// corrupt byte in the state directory must not lock a person out of their own hub, and anyone who can write
     /// there owns the hub already.
-    pub fn claim_revoker(&self, account: &[u8; 32], principal: &[u8; 32], issued_ms: u64) -> Result<Revoker, Refusal> {
+    pub fn claim_revoker(&self, account: &[u8; 32], signer: &Signer, now_ms: u64) -> Result<Revoker, Refusal> {
         // A poisoned lock means another thread panicked holding it, which says nothing about the record on disk.
         let _claim = self.revoker.lock().unwrap_or_else(|e| e.into_inner());
         let path = self.revoker_path(account);
-        let me = hex(principal);
-        match fs::read_to_string(&path).ok().and_then(|s| parse_revoker(&s)) {
-            // The same principal with a later grant: a renewal, or the same key re-paired. Hold the record to the
-            // newest one, so what an operator is shown is the grant actually in use.
-            Some((holder, since_ms)) if holder == me => {
-                if issued_ms > since_ms {
-                    write_revoker(&path, &me, issued_ms)?;
+        match read_revoker(&path).filter(|held| held.until_ms > now_ms) {
+            // The same principal with a later grant: the root re-issued it, or the same key was paired again. Hold
+            // the record to the newest one, so what an operator is shown, and what a client verifies, is the grant
+            // actually in use.
+            Some(held) if held.principal == signer.principal => {
+                if signer.since_ms > held.since_ms {
+                    write_revoker(&path, signer)?;
                 }
                 Ok(Revoker::Held)
             }
-            Some((holder, since_ms)) => Ok(Revoker::Second { holder, since_ms }),
+            Some(held) => Ok(Revoker::Second { holder: held.principal, since_ms: held.since_ms }),
             None => {
-                write_revoker(&path, &me, issued_ms)?;
+                write_revoker(&path, signer)?;
                 Ok(Revoker::Held)
             }
         }
     }
 
+    /// The account's signer as a client is told it (`Welcome.revoker`), or none: no record, or one whose grant has
+    /// run out, which is the same answer because a certificate nobody can present any more signs nothing.
+    pub fn revoker(&self, account: &[u8; 32], now_ms: u64) -> Option<Signer> {
+        let _claim = self.revoker.lock().unwrap_or_else(|e| e.into_inner());
+        read_revoker(&self.revoker_path(account)).filter(|held| held.until_ms > now_ms)
+    }
+
     /// Forget which principal signs `account`'s revocations, so the next `may_revoke` hello claims it: how an
-    /// operator re-places the signer after the device holding it was lost, and how an account that acquired two
-    /// before this was enforced chooses between them. Returns whether there was a record to forget.
+    /// operator re-places the signer without waiting for the old grant to run out, and how an account that acquired
+    /// two before this was enforced chooses between them. Returns whether there was a record to forget.
     pub fn clear_revoker(dir: &Path, account: &str) -> io::Result<bool> {
         match fs::remove_file(dir.join("revokers").join(account)) {
             Ok(()) => Ok(true),
@@ -210,9 +240,9 @@ impl Registry {
         }
     }
 
-    /// Which principal signs each account's revocations, for `wmlhub accounts list`: account, signer, and when the
-    /// grant it presented was issued.
-    pub fn list_revokers(dir: &Path) -> io::Result<HashMap<String, (String, u64)>> {
+    /// Which principal signs each account's revocations, for `wmlhub accounts list`, spent records included: an
+    /// operator asking who signs is also asking why nobody does.
+    pub fn list_revokers(dir: &Path) -> io::Result<HashMap<String, Signer>> {
         let mut out = HashMap::new();
         let entries = match fs::read_dir(dir.join("revokers")) {
             Ok(e) => e,
@@ -221,7 +251,7 @@ impl Registry {
         };
         for entry in entries.filter_map(|e| e.ok()) {
             let account = entry.file_name().to_string_lossy().into_owned();
-            if let Some(held) = fs::read_to_string(entry.path()).ok().and_then(|s| parse_revoker(&s)) {
+            if let Some(held) = read_revoker(&entry.path()) {
                 out.insert(account, held);
             }
         }
@@ -324,29 +354,52 @@ fn storage(e: io::Error) -> Refusal {
     Refusal::Storage(e.to_string())
 }
 
-/// The signer on record: its principal and when the grant it presented was issued. None when the file is absent,
-/// truncated or not in this shape, which `claim_revoker` treats as no record at all.
-fn parse_revoker(text: &str) -> Option<(String, u64)> {
+/// The signer on record, or none when the file is absent, truncated or not in this shape, which `claim_revoker`
+/// treats as no record at all.
+fn read_revoker(path: &Path) -> Option<Signer> {
+    let text = fs::read_to_string(path).ok()?;
     let mut principal = None;
     let mut since_ms = None;
+    let mut until_ms = None;
+    let mut certificate = None;
     for line in text.lines() {
         match line.split_once('=') {
-            Some(("principal", v)) if v.len() == 64 && v.bytes().all(|b| b.is_ascii_hexdigit()) => {
-                principal = Some(v.to_owned());
-            }
+            Some(("principal", v)) if is_hex(v, 64) => principal = Some(v.to_owned()),
             Some(("since_ms", v)) => since_ms = v.trim().parse().ok(),
+            Some(("until_ms", v)) => until_ms = v.trim().parse().ok(),
+            Some(("certificate", v)) => certificate = unhex(v),
             _ => {}
         }
     }
-    Some((principal?, since_ms?))
+    Some(Signer { principal: principal?, since_ms: since_ms?, until_ms: until_ms?, certificate: certificate? })
+}
+
+fn is_hex(s: &str, len: usize) -> bool {
+    s.len() == len && s.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn unhex(s: &str) -> Option<Vec<u8>> {
+    let s = s.trim();
+    if s.is_empty() || s.len() % 2 != 0 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    (0..s.len() / 2).map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()).collect()
 }
 
 /// Replace the record in one step. A half-written record would be read as no record, which would let the next hello
 /// claim a signer the account already has, so it is written beside and renamed over.
-fn write_revoker(path: &Path, principal: &str, since_ms: u64) -> Result<(), Refusal> {
+fn write_revoker(path: &Path, signer: &Signer) -> Result<(), Refusal> {
     let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
     let mut f = fs::File::create(&tmp).map_err(storage)?;
-    writeln!(f, "principal={principal}\nsince_ms={since_ms}").map_err(storage)?;
+    writeln!(
+        f,
+        "principal={}\nsince_ms={}\nuntil_ms={}\ncertificate={}",
+        signer.principal,
+        signer.since_ms,
+        signer.until_ms,
+        hex(&signer.certificate)
+    )
+    .map_err(storage)?;
     fs::rename(&tmp, path).map_err(storage)
 }
 
@@ -366,10 +419,6 @@ mod tests {
 
     fn ip(n: u8) -> IpAddr {
         IpAddr::V4(Ipv4Addr::new(10, 0, 0, n))
-    }
-
-    fn dir_of(r: &Registry) -> PathBuf {
-        r.dir.clone()
     }
 
     #[test]
@@ -413,37 +462,55 @@ mod tests {
 
     // --- one revocation signer per account ---
 
+    /// A `may_revoke` grant as the record keeps it: who, its window, and the certificate a client verifies.
+    fn signer(seed: u8, since_ms: u64, until_ms: u64) -> Signer {
+        Signer { principal: hex(&[seed; 32]), since_ms, until_ms, certificate: vec![seed; 200] }
+    }
+
+    const LATER: u64 = NOW + 86_400_000;
+    const WINDOW: u64 = NOW + 90 * 86_400_000;
+
     #[test]
     fn the_first_may_revoke_hello_claims_the_account_and_keeps_it() {
-        let r = Registry::open(dir("revoker-first"), Registration::Open, OpenLimits::default()).unwrap();
-        assert_eq!(r.claim_revoker(&[1; 32], &[7; 32], NOW), Ok(Revoker::Held));
-        // Reconnecting is not a second signer, and neither is a renewal of the same grant.
-        assert_eq!(r.claim_revoker(&[1; 32], &[7; 32], NOW), Ok(Revoker::Held));
-        assert_eq!(r.claim_revoker(&[1; 32], &[7; 32], NOW + 86_400_000), Ok(Revoker::Held));
-        assert_eq!(
-            Registry::list_revokers(&dir_of(&r)).unwrap().get(&hex(&[1; 32])),
-            Some(&(hex(&[7; 32]), NOW + 86_400_000)),
-            "the record follows the newest grant the signer presented"
-        );
+        let d = dir("revoker-first");
+        let r = Registry::open(&d, Registration::Open, OpenLimits::default()).unwrap();
+        assert_eq!(r.claim_revoker(&[1; 32], &signer(7, NOW, WINDOW), NOW), Ok(Revoker::Held));
+        // Reconnecting is not a second signer, and neither is the root re-issuing the same device's grant.
+        assert_eq!(r.claim_revoker(&[1; 32], &signer(7, NOW, WINDOW), LATER), Ok(Revoker::Held));
+        assert_eq!(r.claim_revoker(&[1; 32], &signer(7, LATER, WINDOW), LATER), Ok(Revoker::Held));
+        let held = r.revoker(&[1; 32], LATER).expect("a signer on record");
+        assert_eq!((held.principal, held.since_ms), (hex(&[7; 32]), LATER), "the record follows the newest grant");
+        assert_eq!(held.certificate, vec![7; 200], "and carries the certificate a client verifies");
     }
 
     #[test]
     fn a_second_signer_is_refused_whichever_grant_is_newer() {
         let r = Registry::open(dir("revoker-second"), Registration::Open, OpenLimits::default()).unwrap();
-        assert_eq!(r.claim_revoker(&[1; 32], &[7; 32], NOW), Ok(Revoker::Held));
+        assert_eq!(r.claim_revoker(&[1; 32], &signer(7, NOW, WINDOW), NOW), Ok(Revoker::Held));
         // NEWER, which is what pairing a second device carelessly produces: refused, so the refusal lands on the
         // device being paired and not on the working signer.
         assert_eq!(
-            r.claim_revoker(&[1; 32], &[8; 32], NOW + 60_000),
+            r.claim_revoker(&[1; 32], &signer(8, NOW + 60_000, WINDOW), NOW + 60_000),
             Ok(Revoker::Second { holder: hex(&[7; 32]), since_ms: NOW })
         );
         // Older, and the same millisecond: a grant that is not the record is not the signer, whatever its clock says.
-        assert!(matches!(r.claim_revoker(&[1; 32], &[8; 32], NOW - 60_000), Ok(Revoker::Second { .. })));
-        assert!(matches!(r.claim_revoker(&[1; 32], &[8; 32], NOW), Ok(Revoker::Second { .. })));
-        // The incumbent is untouched by any of it.
-        assert_eq!(r.claim_revoker(&[1; 32], &[7; 32], NOW), Ok(Revoker::Held));
-        // And another account is a separate question.
-        assert_eq!(r.claim_revoker(&[2; 32], &[8; 32], NOW), Ok(Revoker::Held));
+        assert!(matches!(r.claim_revoker(&[1; 32], &signer(8, NOW - 60_000, WINDOW), NOW), Ok(Revoker::Second { .. })));
+        assert!(matches!(r.claim_revoker(&[1; 32], &signer(8, NOW, WINDOW), NOW), Ok(Revoker::Second { .. })));
+        // The incumbent is untouched by any of it, and another account is a separate question.
+        assert_eq!(r.claim_revoker(&[1; 32], &signer(7, NOW, WINDOW), NOW), Ok(Revoker::Held));
+        assert_eq!(r.claim_revoker(&[2; 32], &signer(8, NOW, WINDOW), NOW), Ok(Revoker::Held));
+    }
+
+    #[test]
+    fn a_record_whose_grant_has_run_out_holds_nothing() {
+        // `may_revoke` cannot be renewed by a delegate, so a signer's certificate expires and the root issues
+        // another. The same device keeps the account; a device that never comes back must not hold it for ever.
+        let r = Registry::open(dir("revoker-spent"), Registration::Open, OpenLimits::default()).unwrap();
+        r.claim_revoker(&[1; 32], &signer(7, NOW, WINDOW), NOW).unwrap();
+        assert!(r.revoker(&[1; 32], WINDOW + 1).is_none(), "a spent record is no record");
+        assert_eq!(r.claim_revoker(&[1; 32], &signer(8, WINDOW, WINDOW * 2), WINDOW + 1), Ok(Revoker::Held));
+        // And the device that held it does not take it back by reconnecting with its old grant.
+        assert!(matches!(r.claim_revoker(&[1; 32], &signer(7, NOW, WINDOW), WINDOW + 2), Ok(Revoker::Second { .. })));
     }
 
     #[test]
@@ -451,34 +518,43 @@ mod tests {
         let d = dir("revoker-persist");
         Registry::open(&d, Registration::Open, OpenLimits::default())
             .unwrap()
-            .claim_revoker(&[1; 32], &[7; 32], NOW)
+            .claim_revoker(&[1; 32], &signer(7, NOW, WINDOW), NOW)
             .unwrap();
         let again = Registry::open(&d, Registration::Open, OpenLimits::default()).unwrap();
         assert!(
-            matches!(again.claim_revoker(&[1; 32], &[8; 32], NOW + 1), Ok(Revoker::Second { .. })),
-            "a restart must not hand the account to whoever connects first"
+            matches!(again.claim_revoker(&[1; 32], &signer(8, NOW + 1, WINDOW), NOW + 1), Ok(Revoker::Second { .. })),
+            "a restart must not hand the account to whoever reconnects first"
         );
+        assert_eq!(again.revoker(&[1; 32], NOW).map(|s| s.certificate), Some(vec![7; 200]));
     }
 
     #[test]
     fn clearing_the_record_hands_the_account_to_the_next_grant() {
         let d = dir("revoker-clear");
         let r = Registry::open(&d, Registration::Open, OpenLimits::default()).unwrap();
-        r.claim_revoker(&[1; 32], &[7; 32], NOW).unwrap();
+        r.claim_revoker(&[1; 32], &signer(7, NOW, WINDOW), NOW).unwrap();
         assert!(Registry::clear_revoker(&d, &hex(&[1; 32])).unwrap());
         assert!(!Registry::clear_revoker(&d, &hex(&[1; 32])).unwrap(), "nothing left to forget");
-        assert_eq!(r.claim_revoker(&[1; 32], &[8; 32], NOW + 1), Ok(Revoker::Held));
+        assert_eq!(r.claim_revoker(&[1; 32], &signer(8, NOW + 1, WINDOW), NOW), Ok(Revoker::Held));
         // And the device that held it is now the second signer, which is the point of clearing it.
-        assert!(matches!(r.claim_revoker(&[1; 32], &[7; 32], NOW), Ok(Revoker::Second { .. })));
+        assert!(matches!(r.claim_revoker(&[1; 32], &signer(7, NOW, WINDOW), NOW), Ok(Revoker::Second { .. })));
     }
 
     #[test]
     fn a_record_that_cannot_be_read_counts_as_none() {
         let d = dir("revoker-corrupt");
         let r = Registry::open(&d, Registration::Open, OpenLimits::default()).unwrap();
-        for junk in ["", "principal=\n", "principal=nothex since_ms=1", &format!("principal={}", hex(&[7; 32]))] {
+        let whole = format!("principal={}\nsince_ms=1\nuntil_ms=2\ncertificate=aabb", hex(&[7; 32]));
+        for junk in [
+            "",
+            "principal=\n",
+            "principal=nothex since_ms=1",
+            &whole[..whole.len() - 20],
+            &format!("{whole}\ncertificate=zz"),
+        ] {
             fs::write(d.join("revokers").join(hex(&[1; 32])), junk).unwrap();
-            assert_eq!(r.claim_revoker(&[1; 32], &[9; 32], NOW), Ok(Revoker::Held), "junk: {junk:?}");
+            assert!(r.revoker(&[1; 32], 0).is_none(), "junk: {junk:?}");
+            assert_eq!(r.claim_revoker(&[1; 32], &signer(9, NOW, WINDOW), NOW), Ok(Revoker::Held), "junk: {junk:?}");
         }
     }
 

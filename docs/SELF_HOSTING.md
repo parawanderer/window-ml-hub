@@ -97,8 +97,9 @@ that grant is refused its login, with "another device signs this account's revoc
 that grant". The reason is not tidiness. A list's version is a timestamp, so two signers race, and the one whose
 clock trails has its removal refused as stale: the device you were removing stays.
 
-`accounts list` says which principal signs for each account. When that device is the one that is gone, forget it, and
-the next device granted `may_revoke` takes over:
+`accounts list` says which principal signs for each account, and until when: a grant lasts 90 days, and once it has
+run out the record is spent, so the next device granted `may_revoke` takes the account with nothing for you to do.
+When the signing device is gone and you would rather not wait, forget it:
 
 ```bash
 docker compose exec hub wmlhub accounts clear-revoker <account-id>
