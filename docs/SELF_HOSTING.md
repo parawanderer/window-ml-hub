@@ -137,10 +137,40 @@ For `open` registration, also lower `WMLHUB_OPEN_TOTAL` to what you are willing 
 
 ## Backups and upgrades
 
-- **Everything worth keeping is in the `wmlhub-data` volume**: registered accounts and outstanding invites. Losing it
-  means accounts must register again (with new invites); no messages or sessions are lost, since the hub never held
-  any.
-- **Upgrade**: `git pull && docker compose up -d --build`.
+- **Everything worth keeping is in the `wmlhub-data` volume**: registered accounts, outstanding invites, and which
+  device signs each account's revocations. Losing it means accounts must register again (with new invites); no
+  messages or sessions are lost, since the hub never held any.
+- **Upgrade**: `git pull && docker compose up -d --build`. The volume is kept, so nothing re-registers.
+
+### Upgrading without losing anybody's sessions
+
+You will not. A session's history lives on the RUNTIME that ran it, never here, so there is nothing on the hub to
+preserve and no migration to run. Concretely, an upgrade costs the seconds the container takes to come back:
+
+- **Every device reconnects on its own**, retrying with a backoff capped at half a minute. Nobody signs in again.
+- **Nothing re-pairs.** Certificates and the account's channel key live in the devices; the hub holds no device keys
+  and cannot issue one. Even losing the whole volume costs one invite per account, not a re-pairing.
+- **A client watching a live session** is told the stream restarted and pages the history back from the runtime
+  (`session.backfill`), because the hub's retained ring is in memory and a restart empties it. What it shows is the
+  runtime's own record, so a transcript survives even though the ring did not. If the runtime is asleep at that
+  moment, the client keeps what it has and fills in when the runtime is back.
+- **Each stream gets a fresh key**, which is how a new connection behaves anyway: a runtime generates one per stream
+  per connection and grants it again to every device present.
+
+So the only reason to delete an account is to change something the account itself holds, and session history is not
+it.
+
+**One upgrade has a visible consequence**, from the version that began enforcing one revocation signer per account:
+the hub starts with no record of who signs, so the first device that logs in holding `may_revoke` claims the account.
+On an account where one device holds it, that is simply correct. On an account that acquired two before the rule
+existed, the other device is refused its login with "another device signs this account's revocations". It is loud,
+it affects nothing else, and the fix touches no sessions:
+
+1. Pair the browser that should NOT sign again, without that grant.
+2. `wmlhub accounts clear-revoker <account-id>`.
+3. Let the device that should sign reconnect; it claims the account within half a minute.
+
+`wmlhub accounts list` shows who claimed it, which is how you tell whether any of this applies to you.
 
 ## All settings
 
