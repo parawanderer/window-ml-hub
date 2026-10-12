@@ -143,6 +143,20 @@ PRs in this repository are **documented checkpoints**, one coherent unit of work
 with a description that says what changed, what was decided and what is untested, and merge it yourself once CI is
 green. Stacked PRs: merge the bottom one, retarget the next to `main`, merge.
 
+**Every GitHub post an agent makes says which session made it** (any harness; a comment, review, inline remark or PR
+body, not a commit). `gh` posts under the owner's account, so without it a session takes another session's comment for
+its own. End the post with:
+
+```markdown
+> *Drafted by Claude Code · work: <slug> · session <first 8 of the id> · <model id>*
+<!-- agent-post: harness=claude-code work=<slug> session=<full session id> model=<model id> -->
+```
+
+`work` is the short name of what you are working on, as the session-mail protocol uses it (`~/git/session-mail/README.md`);
+`session` is your harness's session id (`none` if it has none). The same rule and marker as window-ml, where
+`docs/dev/working-in-the-repo.md` ("GitHub posts say which session made them") has the reasons and `merge-when-green
+--session` reads the marker. A post marked by another session, or unmarked, is someone else's: read it before merging.
+
 ## Findings and tools
 
 A question answered by experiment gets a `docs/findings/<topic>.md` (result, method, what it means, the browser or
